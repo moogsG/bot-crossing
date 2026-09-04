@@ -50,6 +50,14 @@ async function fixtureHome() {
       ended_at INTEGER,
       last_heartbeat_at INTEGER
     );
+    CREATE TABLE task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL,
+      run_id INTEGER,
+      kind TEXT NOT NULL,
+      payload TEXT,
+      created_at INTEGER NOT NULL
+    );
   `)
   db.close()
   return { home, databasePath }
@@ -125,6 +133,23 @@ function insertRun(databasePath, overrides = {}) {
     INSERT INTO task_runs (id, task_id, profile, status, started_at, ended_at, last_heartbeat_at)
     VALUES ($id, $task_id, $profile, $status, $started_at, $ended_at, $last_heartbeat_at)
   `).run(run)
+  db.close()
+}
+
+function insertEvent(databasePath, overrides = {}) {
+  const event = {
+    task_id: 't_default',
+    run_id: 1,
+    kind: 'claimed',
+    payload: null,
+    created_at: 110,
+    ...overrides,
+  }
+  const db = new DatabaseSync(databasePath)
+  db.prepare(`
+    INSERT INTO task_events (task_id, run_id, kind, payload, created_at)
+    VALUES ($task_id, $run_id, $kind, $payload, $created_at)
+  `).run(event)
   db.close()
 }
 
@@ -423,13 +448,13 @@ test('maps task details and heartbeat without consulting run end time', async ()
   assert.equal(JSON.stringify(thread).includes('999999'), false)
 })
 
-test('normalizes the authoritative current run into one stable task-linked actor', async () => {
+test('normalizes an active review claim into one stable task-linked reviewing actor', async () => {
   const { home, databasePath } = await fixtureHome()
   process.env.HERMES_HOME = home
   insertTask(databasePath, {
     id: 't_actor',
     assignee: 'reviewer',
-    status: 'review',
+    status: 'running',
     current_run_id: 42,
     block_kind: 'needs_input',
     last_heartbeat_at: 995,
@@ -442,6 +467,11 @@ test('normalizes the authoritative current run into one stable task-linked actor
     status: 'running',
     started_at: 900,
     last_heartbeat_at: null,
+  })
+  insertEvent(databasePath, {
+    task_id: 't_actor',
+    run_id: 42,
+    payload: JSON.stringify({ run_id: 42, source_status: 'review' }),
   })
   const adapter = createHermesKanban({ now: () => 1_000_000 })
 
@@ -476,6 +506,11 @@ test('classifies actor lifecycle and heartbeat from task and current-run records
     current_run_id: 2,
   })
   insertRun(databasePath, { id: 2, task_id: 't_waiting', status: 'blocked', last_heartbeat_at: null })
+  insertEvent(databasePath, {
+    task_id: 't_waiting',
+    run_id: 2,
+    payload: JSON.stringify({ run_id: 2, source_status: 'review' }),
+  })
   insertTask(databasePath, {
     id: 't_morgan',
     status: 'blocked',
@@ -485,6 +520,11 @@ test('classifies actor lifecycle and heartbeat from task and current-run records
   insertRun(databasePath, { id: 3, task_id: 't_morgan', status: 'blocked', last_heartbeat_at: 999 })
   insertTask(databasePath, { id: 't_completed', status: 'done', current_run_id: 4 })
   insertRun(databasePath, { id: 4, task_id: 't_completed', status: 'done', ended_at: 999 })
+  insertEvent(databasePath, {
+    task_id: 't_completed',
+    run_id: 4,
+    payload: JSON.stringify({ run_id: 4, source_status: 'review' }),
+  })
   insertTask(databasePath, { id: 't_absent', status: 'running' })
   insertRun(databasePath, { id: 5, task_id: 't_absent', status: 'running', last_heartbeat_at: 999 })
   const adapter = createHermesKanban({ now: () => 1_000_000 })

@@ -54,11 +54,13 @@ function validSessionId(value) {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-function actorLifecycleState(taskStatus, runStatus) {
-  if (taskStatus === 'review') return 'reviewing'
-  if (taskStatus === 'blocked' || taskStatus === 'todo' || runStatus === 'blocked') return 'waiting'
+function actorLifecycleState(taskStatus, runStatus, claimedFromReview) {
   if (taskStatus === 'done' || taskStatus === 'archived' || runStatus === 'done' || runStatus === 'released') {
     return 'completed'
+  }
+  if (taskStatus === 'blocked' || taskStatus === 'todo' || runStatus === 'blocked') return 'waiting'
+  if (taskStatus === 'review' || (taskStatus === 'running' && runStatus === 'running' && claimedFromReview)) {
+    return 'reviewing'
   }
   if (runStatus === 'running') return 'working'
   return null
@@ -282,7 +284,14 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
             r.id AS run_id,
             r.profile,
             r.status AS run_status,
-            r.last_heartbeat_at AS run_last_heartbeat_at
+            r.last_heartbeat_at AS run_last_heartbeat_at,
+            (
+              SELECT e.payload
+              FROM task_events e
+              WHERE e.task_id = t.id AND e.run_id = r.id AND e.kind = 'claimed'
+              ORDER BY e.id DESC
+              LIMIT 1
+            ) AS claimed_payload
           FROM tasks t
           INNER JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id
           ORDER BY t.id, r.id
@@ -294,7 +303,13 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
 
     const actors = []
     for (const row of rows) {
-      const lifecycleState = actorLifecycleState(row.task_status, row.run_status)
+      let claimedFromReview = false
+      try {
+        claimedFromReview = JSON.parse(row.claimed_payload || 'null')?.source_status === 'review'
+      } catch {
+        // Missing or malformed lifecycle metadata cannot truthfully establish review provenance.
+      }
+      const lifecycleState = actorLifecycleState(row.task_status, row.run_status, claimedFromReview)
       if (!lifecycleState) continue
       const taskId = String(row.task_id)
       const runId = Number(row.run_id)

@@ -32,6 +32,14 @@ async function actorFixtureHome() {
       status TEXT NOT NULL,
       last_heartbeat_at INTEGER
     );
+    CREATE TABLE task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL,
+      run_id INTEGER,
+      kind TEXT NOT NULL,
+      payload TEXT,
+      created_at INTEGER NOT NULL
+    );
     INSERT INTO tasks VALUES ('t_api', 'running', NULL, 100, NULL, 7);
     INSERT INTO task_runs VALUES (7, 't_api', 'builder', 'running', 100);
   `)
