@@ -79,6 +79,31 @@ export async function scanThreads() {
   return threads
 }
 
+/** Optional harness-owned project catalogs, isolated with the same rules as thread scans. */
+export async function scanProjectCatalogFrom(harnesses, warn = (message) => console.warn(message)) {
+  const lists = await Promise.all(
+    harnesses.map(async (harness) => {
+      if (!harness.scanProjects) return []
+      try {
+        return await harness.scanProjects()
+      } catch (err) {
+        warn(`bot-crossing: harness "${harness.id}" failed to scan projects — ${err?.message || err}`)
+        return []
+      }
+    })
+  )
+  const bySlug = new Map()
+  for (const project of lists.flat()) {
+    if (!project?.slug || bySlug.has(project.slug)) continue
+    bySlug.set(project.slug, project)
+  }
+  return [...bySlug.values()].sort((a, b) => a.slug.localeCompare(b.slug) || a.id.localeCompare(b.id))
+}
+
+export async function scanProjects() {
+  return scanProjectCatalogFrom(await detectedHarnesses())
+}
+
 /** What the HUD shows in the harness list: who is installed, and what they can do. */
 export async function harnessStatus() {
   const detected = new Set((await detectedHarnesses()).map((h) => h.id))

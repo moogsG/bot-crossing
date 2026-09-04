@@ -3,7 +3,14 @@ import './ui/styles.css'
 import { DEFAULT_PRESET, Settings, hasStoredSettings } from './core/settings.js'
 import { Engine } from './core/engine.js'
 import { CameraRig } from './core/camera.js'
-import { Colony, STATUS_LABEL, STATUS_ORDER, statusFor, transcriptProgress } from './game/colony.js'
+import {
+  Colony,
+  STATUS_LABEL,
+  STATUS_ORDER,
+  statusFor,
+  transcriptProgress,
+  wantsMorganAttention,
+} from './game/colony.js'
 import { Hud } from './ui/hud.js'
 import { PLANETS } from './world/planet.js'
 import { loadKit } from './world/kit.js'
@@ -11,6 +18,7 @@ import { crewRig, loadCrew } from './agents/crew.js'
 import { TIMES } from './world/sky.js'
 import {
   fetchThreads,
+  fetchProjects,
   fetchState,
   saveState,
   openThread,
@@ -49,6 +57,7 @@ const colony = new Colony(engine.scene, settings, engine.camera, engine.renderer
 
 let state = { archived: [], archivedAt: {}, opened: [], plots: {}, seen: {} }
 let threads = []
+let projects = []
 /** Last legend built for the bottom bar, kept so the open zone's chip can light up between polls. */
 let legendProjects = []
 /** The zone layout as last written to the colony file, so an unchanged map is not re-saved. */
@@ -244,7 +253,7 @@ function select(id, { fly = false } = {}) {
     return
   }
   colony.astronauts.setSelected(agent)
-  const thread = threads.find((t) => t.id === id) || agent.thread
+  const thread = colony.threads.get(id) || agent.thread
   hud.setSelection(agent, thread)
   // Picking somebody is also picking the zone they are standing on: the sidebar follows.
   if (thread?.project && colony.plots.has(thread.project)) selectedProject = thread.project
@@ -299,6 +308,8 @@ function harnessForProject(name) {
 }
 
 function pathForProject(name) {
+  const known = projects.find((project) => project.slug === name)
+  if (known?.path) return known.path
   const counts = new Map()
   for (const thread of colony.threads.values()) {
     if (thread.project !== name) continue
@@ -327,14 +338,18 @@ function syncProject() {
   }
   const now = Date.now()
   const list = [...colony.threads.values()]
-    .filter((thread) => thread.project === plot.name)
-    .map((thread) => ({
-      id: thread.id,
-      title: thread.title,
-      worktree: thread.worktree,
-      lastActivityAt: thread.lastActivityAt,
-      status: statusFor(thread, now),
-    }))
+    .filter((thread) => thread.project === plot.id)
+    .map((thread) => {
+      const status = statusFor(thread, now)
+      return {
+        id: thread.id,
+        title: thread.title,
+        worktree: thread.worktree,
+        lastActivityAt: thread.lastActivityAt,
+        status,
+        requiresMorgan: wantsMorganAttention(thread, status),
+      }
+    })
     // Whoever wants something first, then most recently touched — the same order of
     // importance the badges use above their heads.
     .sort((a, b) => {
@@ -345,7 +360,7 @@ function syncProject() {
   hud.setProject({
     name: plot.name,
     accent: plot.accent,
-    path: pathForProject(plot.name),
+    path: pathForProject(plot.id) || plot.projectPath || '',
     threads: list,
     selectedId,
   })
@@ -541,14 +556,15 @@ window.addEventListener('keydown', (e) => {
 function applyThreads(list) {
   threads = list
   const archivedSet = new Set(state.archived)
-  const stats = colony.setThreads(list, archivedSet)
+  const stats = colony.setThreads(list, archivedSet, projects)
   hud.setStats(stats)
 
   legendProjects = colony.plotOrder
     .map((plot) => ({
+      id: plot.id,
       name: plot.name,
       accent: plot.accent,
-      count: list.filter((t) => !t.archived && !archivedSet.has(t.id) && t.project === plot.name).length,
+      count: [...colony.threads.values()].filter((t) => t.project === plot.id).length,
       urgent: colony.urgentPlots?.has(plot.id) ?? false,
     }))
     .sort((a, b) => b.count - a.count)
@@ -556,7 +572,7 @@ function applyThreads(list) {
   // Keep the card honest if the thread it is showing changed underneath it.
   if (selectedId) {
     const still = colony.agentFor(selectedId)
-    if (still) hud.setSelection(still, list.find((t) => t.id === selectedId) || still.thread)
+    if (still) hud.setSelection(still, colony.threads.get(selectedId) || still.thread)
     else select(null, {})
   }
   // Which also repaints the legend, so the open zone's chip is lit by the same pass.
@@ -578,7 +594,11 @@ async function poll() {
   if (polling) return
   polling = true
   try {
-    const res = await fetchThreads()
+    const [res, projectResult] = await Promise.all([
+      fetchThreads(),
+      fetchProjects().catch(() => ({ projects })),
+    ])
+    projects = projectResult.projects || []
     applyThreads(res.threads || [])
     hud.removeBoot()
   } catch (err) {

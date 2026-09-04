@@ -69,6 +69,12 @@ export function statusFor(thread, now = Date.now()) {
   return 'idle'
 }
 
+/** Native Kanban tasks declare Morgan attention explicitly; older harnesses retain their badges. */
+export function wantsMorganAttention(thread, status) {
+  if (thread?.source === 'native-kanban') return thread.requiresMorgan === true
+  return status === 'waiting' || status === 'blocked'
+}
+
 /**
  * Which behaviours earn a badge. Dormant and idle deliberately get none: their pose and
  * face already say it, and with most of a real thread list sitting quiet, a badge over
@@ -101,6 +107,52 @@ const BADGE_FOR = {
 export function transcriptProgress(thread) {
   const size = Math.max(1, thread.sizeBytes || 0)
   return THREE.MathUtils.clamp((Math.log10(size) - 3) / 3.5, 0.05, 1)
+}
+
+const normalizedPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
+
+/** Merge persistent known products with task-derived fallback zones, without fake agents. */
+export function projectGroups(threads, catalog = [], archivedIds = new Set()) {
+  const groups = new Map()
+  for (const project of catalog) {
+    if (!project?.slug) continue
+    groups.set(project.slug, {
+      id: project.slug,
+      name: project.name || project.slug,
+      path: project.path || '',
+      threads: [],
+    })
+  }
+
+  for (const thread of threads) {
+    if (thread.archived || archivedIds.has(thread.id)) continue
+    const workspace = normalizedPath(thread.projectPath || thread.cwd)
+    const repository = normalizedPath(thread.repositoryPath)
+    const canonicalGitRepository = String(thread.repositoryId || '').startsWith('git:')
+    const known = catalog.find((project) => {
+      const root = normalizedPath(project.path)
+      if (canonicalGitRepository) return repository && root === repository
+      return (
+        thread.projectId === project.id ||
+        thread.projectId === project.slug ||
+        thread.tenant === project.id ||
+        thread.tenant === project.slug ||
+        thread.project === project.id ||
+        thread.project === project.slug ||
+        thread.project === project.name ||
+        (root && (workspace === root || workspace.startsWith(`${root}/`)))
+      )
+    })
+    const id = known?.slug || thread.repositoryId || thread.project || 'unknown'
+    if (!groups.has(id)) {
+      const name = repository.split('/').at(-1) || thread.project || id
+      groups.set(id, { id, name, path: thread.repositoryPath || thread.projectPath || thread.cwd || '', threads: [] })
+    }
+    groups.get(id).threads.push(
+      known ? { ...thread, project: id, projectPath: known.path || thread.projectPath } : { ...thread, project: id }
+    )
+  }
+  return [...groups.values()]
 }
 
 export class Colony {
@@ -257,21 +309,14 @@ export class Colony {
    * ids — repo name for plots, session id for buildings — so a poll that changes nothing
    * moves nothing on screen.
    */
-  setThreads(threads, archivedIds = new Set()) {
+  setThreads(threads, archivedIds = new Set(), catalog = []) {
     const now = Date.now()
-    const live = threads.filter((t) => !t.archived && !archivedIds.has(t.id))
-
-    // Group by repo, biggest project first so the busiest work lands nearest the middle.
-    const byProject = new Map()
-    for (const thread of live) {
-      const key = thread.project || 'unknown'
-      if (!byProject.has(key)) byProject.set(key, [])
-      byProject.get(key).push(thread)
-    }
-    const projects = [...byProject.entries()].sort((a, b) => {
-      if (b[1].length !== a[1].length) return b[1].length - a[1].length
-      return a[0].localeCompare(b[0])
+    // Known products remain even when quiet; unmatched active threads retain fallback zones.
+    const projects = projectGroups(threads, catalog, archivedIds).sort((a, b) => {
+      if (b.threads.length !== a.threads.length) return b.threads.length - a.threads.length
+      return a.id.localeCompare(b.id)
     })
+    const live = projects.flatMap((project) => project.threads)
 
     this._syncPlots(projects)
 
@@ -286,8 +331,9 @@ export class Colony {
     // only show it on hover.
     const active = new Set()
 
-    for (const [name, list] of projects) {
-      const plot = this.plots.get(name)
+    for (const project of projects) {
+      const list = project.threads
+      const plot = this.plots.get(project.id)
       if (!plot) continue
       // Oldest thread first, so a given session keeps its slot as siblings come and go.
       list.sort((a, b) => a.createdAt - b.createdAt)
@@ -295,7 +341,7 @@ export class Colony {
       list.forEach((thread, i) => {
         const status = statusFor(thread, now)
         if (stats[status] !== undefined) stats[status]++
-        if (status === 'waiting' || status === 'blocked') urgent.add(plot.id)
+        if (wantsMorganAttention(thread, status)) urgent.add(plot.id)
         if (status === 'waiting' || status === 'blocked' || status === 'working') active.add(plot.id)
         stats.agents++
 
@@ -334,7 +380,7 @@ export class Colony {
     // — never because a different repo gained or lost a thread. `plotCells` carries it
     // between polls, and the colony file carries it between sessions.
     const layout = allocateCells(
-      projects.map(([name, list]) => ({ id: name, size: list.length })),
+      projects.map((project) => ({ id: project.id, size: Math.max(1, project.threads.length) })),
       this.plotCells
     )
     // Remembered, not replaced: a project that has just lost its last thread keeps its
@@ -362,17 +408,18 @@ export class Colony {
       this.plots.delete(name)
     }
 
-    projects.forEach(([name], index) => {
-      if (this.plots.has(name)) return
-      const cells = layout.get(name)
+    projects.forEach((project, index) => {
+      if (this.plots.has(project.id)) return
+      const cells = layout.get(project.id)
       if (!cells?.length) return
-      const accent = this._pickAccent(name)
-      const plot = new Plot({ id: name, name, index, cells, accent })
-      plot.signature = wanted.get(name)
-      this.plots.set(name, plot)
+      const accent = this._pickAccent(project.id)
+      const plot = new Plot({ id: project.id, name: project.name, index, cells, accent })
+      plot.projectPath = project.path
+      plot.signature = wanted.get(project.id)
+      this.plots.set(project.id, plot)
       this.plotGroup.add(plot.group)
 
-      const label = createLabel(name, accent)
+      const label = createLabel(project.name, accent)
       label.position.set(plot.labelAnchor.x, 3.2, plot.labelAnchor.z)
       plot.label = label
       this.labelGroup.add(label)

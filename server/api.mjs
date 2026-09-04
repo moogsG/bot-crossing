@@ -9,6 +9,7 @@ import {
   harnessStatus,
   newSession as harnessNewSession,
   openThread as harnessOpenThread,
+  scanProjects,
   scanThreads,
   setThreadArchived,
 } from './scan.mjs'
@@ -257,6 +258,10 @@ export async function apiMiddleware(req, res, next) {
       return send(res, 200, { harnesses: await harnessStatus() })
     }
 
+    if (url.pathname === '/api/projects' && req.method === 'GET') {
+      return send(res, 200, { projects: await scanProjects(), scannedAt: Date.now() })
+    }
+
     if (url.pathname === '/api/state' && req.method === 'GET') {
       return send(res, 200, await readState())
     }
@@ -300,6 +305,7 @@ export async function apiMiddleware(req, res, next) {
         })
       }
       const result = await setThreadArchived(harness, ref, archived)
+      if (harness === 'hermes-kanban' && !result.ok) return send(res, 400, result)
       return send(res, 200, { ...result, ok: true, archived: Boolean(archived), harnessRecord: result.ok })
     }
 
