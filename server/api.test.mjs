@@ -134,6 +134,7 @@ test('actor snapshot captures its cursor before a transition can make the actor 
   await apiMiddleware(request, capture.response)
 
   assert.equal(snapshot.cursor, 0)
+  assert.equal(snapshot.through, 1)
   assert.deepEqual(snapshot.actors, [workingActor])
   assert.deepEqual(capture.result().body.events.map(({ id, kind }) => [id, kind]), [[1, 'completed']])
 })

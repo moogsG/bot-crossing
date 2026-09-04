@@ -25,6 +25,7 @@ import {
   visibleActors,
 } from './game/actor-lifecycle.js'
 import {
+  fetchActorEventBacklog,
   fetchActorEvents,
   fetchActors,
   fetchThreads,
@@ -629,7 +630,7 @@ async function poll() {
       fetchActors(),
       fetchProjects().catch(() => ({ projects })),
     ])
-    const actorEvents = await fetchActorEvents(actorResult.cursor)
+    const actorEvents = await fetchActorEventBacklog(actorResult.cursor, actorResult.through)
     projects = projectResult.projects || []
     applyThreads(res.threads || [], actorResult, actorEvents)
     hud.removeBoot()

@@ -10,6 +10,7 @@ import {
   reduceActorBatch,
   visibleActors,
 } from './actor-lifecycle.js'
+import { fetchActorEventBacklog } from './api.js'
 
 const actor = (overrides = {}) => ({
   id: 'hermes-kanban:actor:t_live:7',
@@ -112,6 +113,37 @@ test('snapshot boundary completion overrides a stale working scan during celebra
   )
 
   assert.equal(visibleActors(state, 3999)[0].lifecycleState, 'completed')
+})
+
+test('snapshot recovery drains a multi-page boundary before applying an empty actor scan', async () => {
+  let state = reconcileActorSnapshot(createActorState(), [actor()], {
+    taskIds: new Set(['t_live']),
+    cursor: 20,
+    now: 1000,
+  })
+  const requested = []
+  const backlog = await fetchActorEventBacklog(20, 221, async (since) => {
+    requested.push(since)
+    if (since === 20) {
+      return {
+        cursor: 220,
+        events: Array.from({ length: 200 }, (_, index) => event(21 + index, 'heartbeat', { taskId: 'other' })),
+      }
+    }
+    return { cursor: 221, events: [event(221, 'completed')] }
+  })
+
+  state = reconcileActorUpdate(
+    state,
+    { actors: [], cursor: 20 },
+    backlog,
+    { taskIds: new Set(['t_live']), now: 2000, celebrationMs: 2000 }
+  )
+
+  assert.deepEqual(requested, [20, 220])
+  assert.equal(state.celebrations.size, 1)
+  assert.equal(visibleActors(state, 3999)[0].lifecycleState, 'completed')
+  assert.equal(visibleActors(state, 4000).length, 0)
 })
 
 test('presentation keeps internal waits quiet and reserves the wave for Jynx attention', () => {

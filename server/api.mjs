@@ -27,7 +27,8 @@ const STATE_VERSION = 1
 export async function readActorSnapshot({ readCursor = actorEventCursor, readActors = scanActors } = {}) {
   const cursor = await readCursor()
   const actors = await readActors()
-  return { actors, cursor }
+  const through = await readCursor()
+  return { actors, cursor, through }
 }
 
 /**
