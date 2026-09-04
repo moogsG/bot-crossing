@@ -43,6 +43,42 @@ function validSessionId(value) {
   return typeof value === 'string' && value.trim().length > 0
 }
 
+const normalizedPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
+
+async function repositoryFor(workspacePath, fallback, execFile) {
+  if (!workspacePath) return { repositoryId: `metadata:${fallback || 'Other'}`, repositoryPath: '' }
+
+  let canonicalWorkspace
+  try {
+    canonicalWorkspace = await fsp.realpath(workspacePath)
+  } catch {
+    canonicalWorkspace = path.resolve(workspacePath)
+  }
+
+  try {
+    const { stdout } = await execFile('git', [
+      '-C',
+      canonicalWorkspace,
+      'rev-parse',
+      '--path-format=absolute',
+      '--show-toplevel',
+      '--git-common-dir',
+    ])
+    const [topLevel, commonDirectory] = String(stdout).trim().split(/\r?\n/)
+    if (!topLevel || !commonDirectory) throw new Error('Git repository identity was incomplete')
+    const repositoryPath = normalizedPath(
+      path.basename(commonDirectory) === '.git' ? path.dirname(commonDirectory) : topLevel
+    )
+    return {
+      repositoryId: `git:${normalizedPath(commonDirectory)}`,
+      repositoryPath,
+    }
+  } catch {
+    const repositoryPath = normalizedPath(canonicalWorkspace)
+    return { repositoryId: `workspace:${repositoryPath}`, repositoryPath }
+  }
+}
+
 export function createHermesKanban({ env = process.env, execFile = execFileAsync } = {}) {
   async function detect() {
     try {
@@ -77,8 +113,9 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
 
   async function scanThreads() {
     const db = new DatabaseSync(databasePath(env), { readOnly: true })
+    let tasks
     try {
-      return db
+      tasks = db
         .prepare(`
           SELECT
             t.id,
@@ -105,11 +142,23 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
           WHERE t.status IN ('ready', 'running', 'review', 'blocked')
         `)
         .all()
-        .map((task) => {
+    } finally {
+      db.close()
+    }
+
+    const repositories = new Map()
+    return Promise.all(
+      tasks.map(async (task) => {
           const taskId = String(task.id)
           const threadId = `hermes-kanban:${taskId}`
           const workspacePath = String(task.workspace_path || '')
           const workspaceName = workspacePath.split(/[\\/]/).filter(Boolean).at(-1)
+          const project = String(task.project_id || task.tenant || workspaceName || 'Other')
+          const repositoryKey = workspacePath ? path.resolve(workspacePath) : `metadata:${project}`
+          if (!repositories.has(repositoryKey)) {
+            repositories.set(repositoryKey, repositoryFor(workspacePath, project, execFile))
+          }
+          const repository = await repositories.get(repositoryKey)
           const body = String(task.body || '')
           const preview = body.replace(/\s+/g, ' ').trim().slice(0, 240)
           const sessionId = validSessionId(task.session_id) ? task.session_id : ''
@@ -127,10 +176,12 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
             id: threadId,
             title: String(task.title || 'Untitled task'),
             preview,
-            project: String(task.project_id || task.tenant || workspaceName || 'Other'),
+            project,
             projectId: String(task.project_id || ''),
             tenant: String(task.tenant || ''),
             projectPath: workspacePath,
+            repositoryId: repository.repositoryId,
+            repositoryPath: repository.repositoryPath,
             worktree: task.workspace_kind === 'worktree' ? String(workspaceName || '') : '',
             cwd: workspacePath,
             gitBranch: String(task.branch_name || ''),
@@ -184,9 +235,7 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
             },
           }
         })
-    } finally {
-      db.close()
-    }
+    )
   }
 
   function openThread(ref) {

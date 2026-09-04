@@ -127,8 +127,11 @@ export function projectGroups(threads, catalog = [], archivedIds = new Set()) {
   for (const thread of threads) {
     if (thread.archived || archivedIds.has(thread.id)) continue
     const workspace = normalizedPath(thread.projectPath || thread.cwd)
+    const repository = normalizedPath(thread.repositoryPath)
+    const canonicalGitRepository = String(thread.repositoryId || '').startsWith('git:')
     const known = catalog.find((project) => {
       const root = normalizedPath(project.path)
+      if (canonicalGitRepository) return repository && root === repository
       return (
         thread.projectId === project.id ||
         thread.projectId === project.slug ||
@@ -140,9 +143,10 @@ export function projectGroups(threads, catalog = [], archivedIds = new Set()) {
         (root && (workspace === root || workspace.startsWith(`${root}/`)))
       )
     })
-    const id = known?.slug || thread.project || 'unknown'
+    const id = known?.slug || thread.repositoryId || thread.project || 'unknown'
     if (!groups.has(id)) {
-      groups.set(id, { id, name: id, path: thread.projectPath || thread.cwd || '', threads: [] })
+      const name = repository.split('/').at(-1) || thread.project || id
+      groups.set(id, { id, name, path: thread.repositoryPath || thread.projectPath || thread.cwd || '', threads: [] })
     }
     groups.get(id).threads.push(
       known ? { ...thread, project: id, projectPath: known.path || thread.projectPath } : { ...thread, project: id }

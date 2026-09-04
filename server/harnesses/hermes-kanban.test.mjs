@@ -3,13 +3,16 @@ import { afterEach, test } from 'node:test'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
+import { promisify } from 'node:util'
 
 import hermesKanban, { createHermesKanban } from './hermes-kanban.mjs'
 import { HARNESSES } from './index.mjs'
 
 const temporaryHomes = []
 const originalHermesHome = process.env.HERMES_HOME
+const execFileAsync = promisify(execFile)
 
 async function fixtureHome() {
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'bot-crossing-hermes-'))
@@ -125,6 +128,23 @@ function insertRun(databasePath, overrides = {}) {
   db.close()
 }
 
+async function gitRepositoryFixture() {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'bot-crossing-repository-'))
+  temporaryHomes.push(root)
+  await execFileAsync('git', ['init', root])
+  await execFileAsync('git', ['-C', root, 'config', 'user.email', 'bot-crossing@example.test'])
+  await execFileAsync('git', ['-C', root, 'config', 'user.name', 'Bot Crossing Test'])
+  await fsp.writeFile(path.join(root, 'fixture.txt'), 'fixture\n')
+  await execFileAsync('git', ['-C', root, 'add', 'fixture.txt'])
+  await execFileAsync('git', ['-C', root, 'commit', '-m', 'fixture'])
+  const first = `${root}-first`
+  const second = `${root}-second`
+  await execFileAsync('git', ['-C', root, 'worktree', 'add', '-b', 'fixture/first', first])
+  await execFileAsync('git', ['-C', root, 'worktree', 'add', '-b', 'fixture/second', second])
+  temporaryHomes.push(first, second)
+  return { root, first, second }
+}
+
 afterEach(async () => {
   if (originalHermesHome === undefined) delete process.env.HERMES_HOME
   else process.env.HERMES_HOME = originalHermesHome
@@ -203,6 +223,75 @@ test('resolves products by project, tenant, workspace basename, then Other', asy
   assert.equal(threads.t_tenant.project, 'product-tenant')
   assert.equal(threads.t_workspace.project, 'product-workspace')
   assert.equal(threads.t_other.project, 'Other')
+})
+
+test('resolves a repository root and sibling worktrees to one canonical repository identity', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  const repository = await gitRepositoryFixture()
+  insertTask(databasePath, {
+    id: 't_root',
+    project_id: 'root-project',
+    workspace_path: repository.root,
+    branch_name: 'main',
+  })
+  insertTask(databasePath, {
+    id: 't_first',
+    project_id: 'first-project',
+    workspace_kind: 'worktree',
+    workspace_path: repository.first,
+    branch_name: 'fixture/first',
+  })
+  insertTask(databasePath, {
+    id: 't_second',
+    project_id: 'second-project',
+    workspace_kind: 'worktree',
+    workspace_path: repository.second,
+    branch_name: 'fixture/second',
+  })
+
+  const threads = await hermesKanban.scanThreads()
+  const canonicalRoot = await fsp.realpath(repository.root)
+
+  assert.equal(new Set(threads.map(({ repositoryId }) => repositoryId)).size, 1)
+  assert.deepEqual(new Set(threads.map(({ repositoryPath }) => repositoryPath)), new Set([canonicalRoot]))
+  assert.deepEqual(
+    threads.map(({ gitBranch }) => gitBranch).sort(),
+    ['fixture/first', 'fixture/second', 'main']
+  )
+})
+
+test('keeps distinct repositories separate and falls back deterministically for non-Git and missing workspaces', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  const firstRepository = await gitRepositoryFixture()
+  const secondRepository = await gitRepositoryFixture()
+  const nonGit = await fsp.mkdtemp(path.join(os.tmpdir(), 'bot-crossing-non-git-'))
+  temporaryHomes.push(nonGit)
+  const missing = path.join(home, 'missing-workspace')
+  insertTask(databasePath, { id: 't_repo_one', workspace_path: firstRepository.root })
+  insertTask(databasePath, { id: 't_repo_two', workspace_path: secondRepository.root })
+  insertTask(databasePath, { id: 't_non_git', workspace_kind: 'scratch', workspace_path: nonGit })
+  insertTask(databasePath, { id: 't_missing', workspace_path: missing })
+  insertTask(databasePath, { id: 't_missing_again', workspace_path: missing, branch_name: 'unrelated-branch' })
+  const gitCalls = []
+  const adapter = createHermesKanban({
+    execFile: async (command, args) => {
+      gitCalls.push([command, args])
+      return execFileAsync(command, args)
+    },
+  })
+
+  const threads = Object.fromEntries((await adapter.scanThreads()).map((thread) => [thread.ref.taskId, thread]))
+  const canonicalNonGit = await fsp.realpath(nonGit)
+
+  assert.notEqual(threads.t_repo_one.repositoryId, threads.t_repo_two.repositoryId)
+  assert.equal(threads.t_non_git.repositoryId, `workspace:${canonicalNonGit}`)
+  assert.equal(threads.t_non_git.repositoryPath, canonicalNonGit)
+  assert.equal(threads.t_missing.repositoryId, `workspace:${missing}`)
+  assert.equal(threads.t_missing.repositoryPath, missing)
+  assert.equal(threads.t_missing_again.repositoryId, threads.t_missing.repositoryId)
+  assert.equal(gitCalls.length, 4)
 })
 
 test('maps Kanban states to working, waiting, and blocked semantics', async () => {

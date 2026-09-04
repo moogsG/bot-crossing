@@ -48,6 +48,114 @@ test('known projects persist without agents and matching tasks share their stabl
   )
 })
 
+test('canonical repository identity keeps branches and sibling worktrees in one zone', () => {
+  const catalog = [
+    { id: 'p_bot', slug: 'bot-crossing', name: 'Bot Crossing', path: '/work/bot-crossing' },
+    { id: 'p_quiet', slug: 'quiet', name: 'Quiet Repository', path: '/work/quiet' },
+  ]
+  const threads = [
+    {
+      id: 'root',
+      project: 'root-project',
+      projectId: 'root-project',
+      projectPath: '/work/bot-crossing',
+      repositoryId: 'git:/work/bot-crossing/.git',
+      repositoryPath: '/work/bot-crossing',
+    },
+    {
+      id: 'first-worktree',
+      project: 'first-project',
+      projectId: 'first-project',
+      projectPath: '/work/bot-crossing/.worktrees/first',
+      repositoryId: 'git:/work/bot-crossing/.git',
+      repositoryPath: '/work/bot-crossing',
+    },
+    {
+      id: 'second-worktree',
+      project: 'second-project',
+      projectId: 'second-project',
+      projectPath: '/tmp/sibling-worktree',
+      repositoryId: 'git:/work/bot-crossing/.git',
+      repositoryPath: '/work/bot-crossing',
+    },
+  ]
+
+  const groups = projectGroups(threads, catalog)
+
+  assert.deepEqual(
+    groups.map(({ id, threads: members }) => [id, members.map((thread) => thread.id)]),
+    [
+      ['bot-crossing', ['root', 'first-worktree', 'second-worktree']],
+      ['quiet', []],
+    ]
+  )
+})
+
+test('fallback identities reconcile to a known canonical repository zone', () => {
+  const catalog = [
+    { id: 'p_bot', slug: 'bot-crossing', name: 'Bot Crossing', path: '/work/bot-crossing' },
+  ]
+  const threads = [
+    {
+      id: 'canonical',
+      project: 'bot-crossing',
+      projectId: 'p_bot',
+      projectPath: '/work/bot-crossing',
+      repositoryId: 'git:/work/bot-crossing/.git',
+      repositoryPath: '/work/bot-crossing',
+    },
+    {
+      id: 'missing-worktree',
+      project: 't_missing',
+      projectPath: '/work/bot-crossing/.worktrees/t_missing',
+      repositoryId: 'workspace:/work/bot-crossing/.worktrees/t_missing',
+      repositoryPath: '/work/bot-crossing/.worktrees/t_missing',
+    },
+    {
+      id: 'pathless',
+      project: 'p_bot',
+      projectId: 'p_bot',
+      projectPath: '',
+      repositoryId: 'metadata:p_bot',
+      repositoryPath: '',
+    },
+  ]
+
+  const groups = projectGroups(threads, catalog)
+
+  assert.deepEqual(
+    groups.map(({ id, threads: members }) => [id, members.map((thread) => thread.id)]),
+    [['bot-crossing', ['canonical', 'missing-worktree', 'pathless']]]
+  )
+})
+
+test('canonical repository identity keeps distinct repositories separate despite shared project metadata', () => {
+  const groups = projectGroups([
+    {
+      id: 'first',
+      project: 'shared-project',
+      projectId: 'shared-project',
+      repositoryId: 'git:/work/first/.git',
+      repositoryPath: '/work/first',
+    },
+    {
+      id: 'second',
+      project: 'shared-project',
+      projectId: 'shared-project',
+      repositoryId: 'git:/work/second/.git',
+      repositoryPath: '/work/second',
+    },
+  ])
+
+  assert.deepEqual(
+    groups.map(({ id, threads }) => [id, threads.map((thread) => thread.id)]),
+    [
+      ['git:/work/first/.git', ['first']],
+      ['git:/work/second/.git', ['second']],
+    ]
+  )
+})
+
 test('archived tasks do not create agents or fallback zones', () => {
   const groups = projectGroups(
     [
