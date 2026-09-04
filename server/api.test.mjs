@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-import { apiMiddleware } from './api.mjs'
+import { apiMiddleware, readActorSnapshot } from './api.mjs'
 
 const temporaryHomes = []
 const originalHermesHome = process.env.HERMES_HOME
@@ -97,6 +97,45 @@ test('GET /api/actors returns normalized snapshots and the explicit lifecycle ev
   assert.equal(result.body.actors[0].harness, 'hermes-kanban')
   assert.equal(result.body.cursor, 0)
   assert.equal(typeof result.body.scannedAt, 'number')
+})
+
+test('actor snapshot captures its cursor before a transition can make the actor scan stale', async () => {
+  const home = await actorFixtureHome()
+  process.env.HERMES_HOME = home
+  const databasePath = path.join(home, 'kanban', 'boards', 'native', 'kanban.db')
+  const workingActor = { id: 'hermes-kanban:actor:t_api:7', lifecycleState: 'working' }
+
+  const snapshot = await readActorSnapshot({
+    readCursor: async () => {
+      const db = new DatabaseSync(databasePath, { readOnly: true })
+      try {
+        return Number(db.prepare('SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events').get().cursor)
+      } finally {
+        db.close()
+      }
+    },
+    readActors: async () => {
+      const db = new DatabaseSync(databasePath)
+      db.exec(`
+        BEGIN;
+        UPDATE tasks SET status = 'done' WHERE id = 't_api';
+        UPDATE task_runs SET status = 'done' WHERE id = 7;
+        INSERT INTO task_events (task_id, run_id, kind, payload, created_at)
+        VALUES ('t_api', 7, 'completed', NULL, 101);
+        COMMIT;
+      `)
+      db.close()
+      return [workingActor]
+    },
+  })
+  const capture = responseCapture()
+  const request = { url: `/api/events?since=${snapshot.cursor}`, method: 'GET', headers: { host: 'localhost:5274' } }
+
+  await apiMiddleware(request, capture.response)
+
+  assert.equal(snapshot.cursor, 0)
+  assert.deepEqual(snapshot.actors, [workingActor])
+  assert.deepEqual(capture.result().body.events.map(({ id, kind }) => [id, kind]), [[1, 'completed']])
 })
 
 test('GET /api/events returns an ordered no-store lifecycle cursor', async () => {

@@ -24,6 +24,12 @@ const STATE_FILE = path.join(DATA_DIR, 'colony.json')
 
 const STATE_VERSION = 1
 
+export async function readActorSnapshot({ readCursor = actorEventCursor, readActors = scanActors } = {}) {
+  const cursor = await readCursor()
+  const actors = await readActors()
+  return { actors, cursor }
+}
+
 /**
  * Colony state is only ever the things the *game* invents — which plot a project got,
  * what a thread's building looks like, what you archived. The threads themselves stay
@@ -259,9 +265,9 @@ export async function apiMiddleware(req, res, next) {
     }
 
     if (url.pathname === '/api/actors' && req.method === 'GET') {
+      const snapshot = await readActorSnapshot()
       return send(res, 200, {
-        actors: await scanActors(),
-        cursor: await actorEventCursor(),
+        ...snapshot,
         eventVocabulary: ACTOR_EVENT_VOCABULARY,
         scannedAt: Date.now(),
       })
