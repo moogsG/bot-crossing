@@ -31,7 +31,7 @@ export function reconcileActorSnapshot(state, snapshot, { taskIds, cursor = stat
     const prior = state.actors.get(id)
     if (!prior || !taskIds.has(prior.taskId)) continue
     celebrations.set(id, until)
-    if (!actors.has(id)) actors.set(id, { ...prior, lifecycleState: 'completed' })
+    actors.set(id, { ...(actors.get(id) || prior), lifecycleState: 'completed' })
   }
 
   return {
@@ -73,6 +73,22 @@ export function reduceActorBatch(state, events, { now = Date.now(), celebrationM
     }
   }
   return next
+}
+
+export function reconcileActorUpdate(
+  state,
+  snapshot,
+  batch,
+  { taskIds, now = Date.now(), celebrationMs = DEFAULT_CELEBRATION_MS }
+) {
+  const boundary = Math.max(0, Number(snapshot?.cursor) || 0)
+  const staged = reduceActorBatch(
+    { ...state, cursor: boundary, needsReconcile: false },
+    batch?.events || [],
+    { now, celebrationMs }
+  )
+  const cursor = Math.max(staged.cursor, Number(batch?.cursor) || 0)
+  return reconcileActorSnapshot(staged, snapshot?.actors || [], { taskIds, cursor, now })
 }
 
 export function visibleActors(state, now = Date.now()) {

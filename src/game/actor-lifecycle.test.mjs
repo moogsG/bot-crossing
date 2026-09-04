@@ -5,6 +5,7 @@ import {
   actorOpenTarget,
   actorPresentation,
   createActorState,
+  reconcileActorUpdate,
   reconcileActorSnapshot,
   reduceActorBatch,
   visibleActors,
@@ -73,6 +74,44 @@ test('completion celebrates once for a bounded interval and then removes only th
 
   state = reduceActorBatch(state, [event(21, 'completed')], { now: 2500, celebrationMs: 2000 })
   assert.equal(state.celebrations.get(actor().id), 4000)
+})
+
+test('snapshot boundary completion survives an empty scan for one bounded celebration', () => {
+  let state = reconcileActorSnapshot(createActorState(), [actor()], {
+    taskIds: new Set(['t_live']),
+    cursor: 20,
+    now: 1000,
+  })
+
+  state = reconcileActorUpdate(
+    state,
+    { actors: [], cursor: 20 },
+    { events: [event(21, 'completed')], cursor: 21 },
+    { taskIds: new Set(['t_live']), now: 2000, celebrationMs: 2000 }
+  )
+
+  assert.deepEqual(visibleActors(state, 3999).map(({ id, lifecycleState }) => ({ id, lifecycleState })), [
+    { id: actor().id, lifecycleState: 'completed' },
+  ])
+  assert.equal(visibleActors(state, 4000).length, 0)
+  assert.equal(state.cursor, 21)
+})
+
+test('snapshot boundary completion overrides a stale working scan during celebration', () => {
+  let state = reconcileActorSnapshot(createActorState(), [actor()], {
+    taskIds: new Set(['t_live']),
+    cursor: 20,
+    now: 1000,
+  })
+
+  state = reconcileActorUpdate(
+    state,
+    { actors: [actor()], cursor: 20 },
+    { events: [event(21, 'completed')], cursor: 21 },
+    { taskIds: new Set(['t_live']), now: 2000, celebrationMs: 2000 }
+  )
+
+  assert.equal(visibleActors(state, 3999)[0].lifecycleState, 'completed')
 })
 
 test('presentation keeps internal waits quiet and reserves the wave for Jynx attention', () => {

@@ -330,6 +330,14 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
         steward: 'Jynx',
       })
     }
+    const sessionCounts = new Map()
+    for (const actor of actors) {
+      const sessionId = actor.managingSession.id
+      if (sessionId) sessionCounts.set(sessionId, (sessionCounts.get(sessionId) || 0) + 1)
+    }
+    for (const actor of actors) {
+      if ((sessionCounts.get(actor.managingSession.id) || 0) > 1) actor.managingSession.canOpen = false
+    }
     return actors
   }
 

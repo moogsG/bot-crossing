@@ -502,6 +502,28 @@ test('normalizes an active review claim into one stable task-linked reviewing ac
   assert.deepEqual(second, first)
 })
 
+test('disables actor navigation when active runs share a non-unique managing session', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  for (const [id, runId, profile] of [['t_builder', 41, 'builder'], ['t_reviewer', 42, 'reviewer']]) {
+    insertTask(databasePath, {
+      id,
+      assignee: profile,
+      status: 'running',
+      current_run_id: runId,
+      session_id: 'shared-session',
+    })
+    insertRun(databasePath, { id: runId, task_id: id, profile, status: 'running' })
+  }
+
+  const actors = await createHermesKanban().scanActors()
+
+  assert.deepEqual(actors.map(({ managingSession }) => managingSession), [
+    { id: 'shared-session', canOpen: false },
+    { id: 'shared-session', canOpen: false },
+  ])
+})
+
 test('classifies actor lifecycle and heartbeat from task and current-run records only', async () => {
   const { home, databasePath } = await fixtureHome()
   process.env.HERMES_HOME = home

@@ -19,6 +19,7 @@ import { TIMES } from './world/sky.js'
 import {
   actorOpenTarget,
   createActorState,
+  reconcileActorUpdate,
   reconcileActorSnapshot,
   reduceActorBatch,
   visibleActors,
@@ -573,14 +574,16 @@ window.addEventListener('keydown', (e) => {
 
 // ── data ──────────────────────────────────────────────────────────────────────────────
 
-function applyThreads(list, actorResult = null) {
+function applyThreads(list, actorResult = null, actorEvents = null) {
   threads = list
   if (actorResult) {
-    actorState = reconcileActorSnapshot(actorState, actorResult.actors || [], {
+    const options = {
       taskIds: new Set(list.map((thread) => thread.ref?.taskId).filter(Boolean)),
-      cursor: actorResult.cursor,
       now: Date.now(),
-    })
+    }
+    actorState = actorEvents
+      ? reconcileActorUpdate(actorState, actorResult, actorEvents, options)
+      : reconcileActorSnapshot(actorState, actorResult.actors || [], { ...options, cursor: actorResult.cursor })
   }
   const archivedSet = new Set(state.archived)
   const stats = colony.setThreads(list, archivedSet, projects, visibleActors(actorState))
@@ -626,8 +629,9 @@ async function poll() {
       fetchActors(),
       fetchProjects().catch(() => ({ projects })),
     ])
+    const actorEvents = await fetchActorEvents(actorResult.cursor)
     projects = projectResult.projects || []
-    applyThreads(res.threads || [], actorResult)
+    applyThreads(res.threads || [], actorResult, actorEvents)
     hud.removeBoot()
   } catch (err) {
     hud.toast(err.message || 'Could not reach the thread scanner', 'err')
