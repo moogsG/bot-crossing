@@ -3,8 +3,35 @@ import { test } from 'node:test'
 import { createServer } from 'vite'
 
 const vite = await createServer({ server: { middlewareMode: true, hmr: false }, appType: 'custom' })
-const { morganAttentionCount, taskDetailsFor } = await vite.ssrLoadModule('/src/ui/hud.js')
+const { Hud, morganAttentionCount, taskDetailsFor } = await vite.ssrLoadModule('/src/ui/hud.js')
 await vite.close()
+
+function fakeElement() {
+  return {
+    classList: { add() {}, remove() {} },
+    style: {},
+    innerHTML: '',
+    textContent: '',
+    title: '',
+    disabled: false,
+    scrollTop: 0,
+    appendChild() {},
+    addEventListener() {},
+    setAttribute() {},
+  }
+}
+
+function projectPanelHud() {
+  const elements = new Map()
+  const hud = Object.create(Hud.prototype)
+  hud._last = {}
+  hud.actions = {}
+  hud.$ = (selector) => {
+    if (!elements.has(selector)) elements.set(selector, fakeElement())
+    return elements.get(selector)
+  }
+  return { hud, elements }
+}
 
 test('Hermes task detail rows expose operational fields and an honest never heartbeat', () => {
   const thread = {
@@ -68,4 +95,38 @@ test('project summary counts only explicit Morgan attention and preserves legacy
     ]),
     3
   )
+})
+
+test('open project panel refreshes Morgan attention when blocked status does not change', () => {
+  const previousDocument = globalThis.document
+  globalThis.document = { createElement: fakeElement }
+  try {
+    const { hud, elements } = projectPanelHud()
+    const project = {
+      name: 'Product',
+      path: '/work/product',
+      accent: 0x123456,
+      selectedId: null,
+      threads: [
+        {
+          id: 't_attention',
+          status: 'blocked',
+          title: 'Waiting task',
+          lastActivityAt: 100,
+          requiresMorgan: true,
+        },
+      ],
+    }
+
+    hud.setProject(project)
+    assert.match(elements.get('.side .threads-head').innerHTML, /1 need you/)
+
+    hud.setProject({
+      ...project,
+      threads: [{ ...project.threads[0], requiresMorgan: false }],
+    })
+    assert.doesNotMatch(elements.get('.side .threads-head').innerHTML, /need you/)
+  } finally {
+    globalThis.document = previousDocument
+  }
 })
