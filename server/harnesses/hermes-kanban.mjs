@@ -7,6 +7,17 @@ import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFileCallback)
 const TASK_ID = /^t_[A-Za-z0-9_-]+$/
+const FRESH_HEARTBEAT_MS = 2 * 60 * 1000
+
+export const ACTOR_EVENT_VOCABULARY = Object.freeze([
+  'claimed',
+  'heartbeat',
+  'blocked',
+  'review_requested',
+  'changes_requested',
+  'completed',
+  'archived',
+])
 
 function configuredHome(env) {
   return env.HERMES_HOME || path.join(os.homedir(), '.hermes')
@@ -41,6 +52,24 @@ function attentionFor(status, blockKind) {
 
 function validSessionId(value) {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function actorLifecycleState(taskStatus, runStatus) {
+  if (taskStatus === 'review') return 'reviewing'
+  if (taskStatus === 'blocked' || taskStatus === 'todo' || runStatus === 'blocked') return 'waiting'
+  if (taskStatus === 'done' || taskStatus === 'archived' || runStatus === 'done' || runStatus === 'released') {
+    return 'completed'
+  }
+  if (runStatus === 'running') return 'working'
+  return null
+}
+
+function actorHeartbeat(lastAt, now) {
+  if (!lastAt) return { lastAt: 0, freshness: 'missing' }
+  return {
+    lastAt,
+    freshness: Math.max(0, now - lastAt) <= FRESH_HEARTBEAT_MS ? 'fresh' : 'stale',
+  }
 }
 
 const normalizedPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
@@ -79,7 +108,7 @@ async function repositoryFor(workspacePath, fallback, execFile) {
   }
 }
 
-export function createHermesKanban({ env = process.env, execFile = execFileAsync } = {}) {
+export function createHermesKanban({ env = process.env, execFile = execFileAsync, now = Date.now } = {}) {
   async function detect() {
     try {
       await fsp.access(databasePath(env))
@@ -238,6 +267,57 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
     )
   }
 
+  async function scanActors() {
+    const db = new DatabaseSync(databasePath(env), { readOnly: true })
+    let rows
+    try {
+      rows = db
+        .prepare(`
+          SELECT
+            t.id AS task_id,
+            t.status AS task_status,
+            t.block_kind,
+            t.last_heartbeat_at AS task_last_heartbeat_at,
+            t.session_id,
+            r.id AS run_id,
+            r.profile,
+            r.status AS run_status,
+            r.last_heartbeat_at AS run_last_heartbeat_at
+          FROM tasks t
+          INNER JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id
+          ORDER BY t.id, r.id
+        `)
+        .all()
+    } finally {
+      db.close()
+    }
+
+    const actors = []
+    for (const row of rows) {
+      const lifecycleState = actorLifecycleState(row.task_status, row.run_status)
+      if (!lifecycleState) continue
+      const taskId = String(row.task_id)
+      const runId = Number(row.run_id)
+      const sessionId = validSessionId(row.session_id) ? row.session_id : ''
+      const heartbeatAt = Math.max(
+        epochMilliseconds(row.run_last_heartbeat_at),
+        epochMilliseconds(row.task_last_heartbeat_at)
+      )
+      actors.push({
+        id: `hermes-kanban:actor:${taskId}:${runId}`,
+        taskId,
+        runId,
+        profile: String(row.profile || ''),
+        lifecycleState,
+        heartbeat: actorHeartbeat(heartbeatAt, now()),
+        requiresMorgan: attentionFor(row.task_status, row.block_kind).requiresMorgan,
+        managingSession: { id: sessionId, canOpen: Boolean(sessionId) },
+        steward: 'Jynx',
+      })
+    }
+    return actors
+  }
+
   function openThread(ref) {
     if (!validSessionId(ref?.sessionId)) return { ok: false, error: 'No managing Hermes session is available' }
     return { ok: true, url: `hermes://open/${encodeURIComponent(ref.sessionId)}` }
@@ -274,6 +354,7 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
     detect,
     scanProjects,
     scanThreads,
+    scanActors,
     openThread,
     newSession: () => ({ ok: false, error: 'Hermes Kanban cannot start conversations from Bot Crossing' }),
     setArchived,

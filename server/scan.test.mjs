@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { scanProjectCatalogFrom } from './scan.mjs'
+import { scanActorSnapshotsFrom, scanProjectCatalogFrom } from './scan.mjs'
 
 test('project catalog aggregation is stable, deduplicated, and fault isolated', async () => {
   const warnings = []
@@ -29,4 +29,28 @@ test('project catalog aggregation is stable, deduplicated, and fault isolated', 
   ])
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /broken registry/)
+})
+
+test('actor aggregation is stable, deduplicated, and fault isolated', async () => {
+  const warnings = []
+  const actor = { id: 'hermes-kanban:actor:t_one:1', taskId: 't_one', runId: 1 }
+  const actors = await scanActorSnapshotsFrom(
+    [
+      {
+        id: 'first',
+        scanActors: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          return [actor]
+        },
+      },
+      { id: 'duplicate', scanActors: async () => [{ ...actor }] },
+      { id: 'threads-only' },
+      { id: 'broken', scanActors: async () => Promise.reject(new Error('broken actor scan')) },
+    ],
+    (message) => warnings.push(message)
+  )
+
+  assert.deepEqual(actors, [{ ...actor, harness: 'first' }])
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /broken actor scan/)
 })

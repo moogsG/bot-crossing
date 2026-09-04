@@ -9,10 +9,12 @@ import {
   harnessStatus,
   newSession as harnessNewSession,
   openThread as harnessOpenThread,
+  scanActors,
   scanProjects,
   scanThreads,
   setThreadArchived,
 } from './scan.mjs'
+import { ACTOR_EVENT_VOCABULARY } from './harnesses/hermes-kanban.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.BOT_CROSSING_DATA || path.join(here, '..', 'data')
@@ -252,6 +254,14 @@ export async function apiMiddleware(req, res, next) {
     if (url.pathname === '/api/threads' && req.method === 'GET') {
       const threads = await reconcileArchived(await scanThreads())
       return send(res, 200, { threads, scannedAt: Date.now() })
+    }
+
+    if (url.pathname === '/api/actors' && req.method === 'GET') {
+      return send(res, 200, {
+        actors: await scanActors(),
+        eventVocabulary: ACTOR_EVENT_VOCABULARY,
+        scannedAt: Date.now(),
+      })
     }
 
     if (url.pathname === '/api/harnesses' && req.method === 'GET') {

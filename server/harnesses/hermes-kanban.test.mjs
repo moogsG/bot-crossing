@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 import { promisify } from 'node:util'
 
-import hermesKanban, { createHermesKanban } from './hermes-kanban.mjs'
+import hermesKanban, { ACTOR_EVENT_VOCABULARY, createHermesKanban } from './hermes-kanban.mjs'
 import { HARNESSES } from './index.mjs'
 
 const temporaryHomes = []
@@ -421,6 +421,98 @@ test('maps task details and heartbeat without consulting run end time', async ()
     lastHeartbeatAt: 150000,
   })
   assert.equal(JSON.stringify(thread).includes('999999'), false)
+})
+
+test('normalizes the authoritative current run into one stable task-linked actor', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  insertTask(databasePath, {
+    id: 't_actor',
+    assignee: 'reviewer',
+    status: 'review',
+    current_run_id: 42,
+    block_kind: 'needs_input',
+    last_heartbeat_at: 995,
+    session_id: 'managing/session',
+  })
+  insertRun(databasePath, {
+    id: 42,
+    task_id: 't_actor',
+    profile: 'reviewer',
+    status: 'running',
+    started_at: 900,
+    last_heartbeat_at: null,
+  })
+  const adapter = createHermesKanban({ now: () => 1_000_000 })
+
+  const first = await adapter.scanActors()
+  const second = await adapter.scanActors()
+
+  assert.deepEqual(first, [
+    {
+      id: 'hermes-kanban:actor:t_actor:42',
+      taskId: 't_actor',
+      runId: 42,
+      profile: 'reviewer',
+      lifecycleState: 'reviewing',
+      heartbeat: { lastAt: 995000, freshness: 'fresh' },
+      requiresMorgan: false,
+      managingSession: { id: 'managing/session', canOpen: true },
+      steward: 'Jynx',
+    },
+  ])
+  assert.deepEqual(second, first)
+})
+
+test('classifies actor lifecycle and heartbeat from task and current-run records only', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  insertTask(databasePath, { id: 't_working', status: 'running', current_run_id: 1 })
+  insertRun(databasePath, { id: 1, task_id: 't_working', status: 'running', last_heartbeat_at: 700 })
+  insertTask(databasePath, {
+    id: 't_waiting',
+    status: 'blocked',
+    block_kind: 'dependency',
+    current_run_id: 2,
+  })
+  insertRun(databasePath, { id: 2, task_id: 't_waiting', status: 'blocked', last_heartbeat_at: null })
+  insertTask(databasePath, {
+    id: 't_morgan',
+    status: 'blocked',
+    block_kind: 'capability',
+    current_run_id: 3,
+  })
+  insertRun(databasePath, { id: 3, task_id: 't_morgan', status: 'blocked', last_heartbeat_at: 999 })
+  insertTask(databasePath, { id: 't_completed', status: 'done', current_run_id: 4 })
+  insertRun(databasePath, { id: 4, task_id: 't_completed', status: 'done', ended_at: 999 })
+  insertTask(databasePath, { id: 't_absent', status: 'running' })
+  insertRun(databasePath, { id: 5, task_id: 't_absent', status: 'running', last_heartbeat_at: 999 })
+  const adapter = createHermesKanban({ now: () => 1_000_000 })
+
+  const actors = Object.fromEntries((await adapter.scanActors()).map((actor) => [actor.taskId, actor]))
+
+  assert.deepEqual(Object.keys(actors).sort(), ['t_completed', 't_morgan', 't_waiting', 't_working'])
+  assert.equal(actors.t_working.lifecycleState, 'working')
+  assert.deepEqual(actors.t_working.heartbeat, { lastAt: 700000, freshness: 'stale' })
+  assert.equal(actors.t_waiting.lifecycleState, 'waiting')
+  assert.deepEqual(actors.t_waiting.heartbeat, { lastAt: 0, freshness: 'missing' })
+  assert.equal(actors.t_waiting.requiresMorgan, false)
+  assert.equal(actors.t_morgan.requiresMorgan, true)
+  assert.equal(actors.t_completed.lifecycleState, 'completed')
+  assert.deepEqual(actors.t_completed.managingSession, { id: '', canOpen: false })
+})
+
+test('exposes the bounded Kanban event vocabulary needed for actor lifecycle updates', () => {
+  assert.deepEqual(ACTOR_EVENT_VOCABULARY, [
+    'claimed',
+    'heartbeat',
+    'blocked',
+    'review_requested',
+    'changes_requested',
+    'completed',
+    'archived',
+  ])
+  assert.equal(Object.isFrozen(ACTOR_EVENT_VOCABULARY), true)
 })
 
 test('opens only valid managing sessions with the supported encoded desktop deep link', () => {
