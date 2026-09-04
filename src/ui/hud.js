@@ -376,7 +376,7 @@ export class Hud {
    * can carry a count and an alarm without running out of room at eleven repos.
    */
   setLegend(projects, activeName = null) {
-    const signature = projects.map((p) => `${p.name}:${p.count}:${p.accent}:${p.urgent ? 1 : 0}`).join('|') + `~${activeName}`
+    const signature = projects.map((p) => `${p.id}:${p.name}:${p.count}:${p.accent}:${p.urgent ? 1 : 0}`).join('|') + `~${activeName}`
     if (this._last.legend === signature) return
     this._last.legend = signature
 
@@ -387,13 +387,13 @@ export class Hud {
       b.type = 'button'
       b.className = 'repo'
       b.title = `${p.count} thread${p.count === 1 ? '' : 's'} in ${p.name}`
-      b.setAttribute('aria-pressed', String(p.name === activeName))
+      b.setAttribute('aria-pressed', String(p.id === activeName))
       b.innerHTML =
         `<i class="swatch" style="background:${hex(p.accent)};color:${hex(p.accent)}"></i>` +
         `<span class="n">${escapeHtml(p.name)}</span>` +
         (p.urgent ? '<i class="alarm"></i>' : '') +
         `<span class="count">${p.count}</span>`
-      b.addEventListener('click', () => this.actions.pickProject?.(p.name))
+      b.addEventListener('click', () => this.actions.pickProject?.(p.id))
       wrap.appendChild(b)
     }
     this.$('.sec-head span').textContent = `${projects.length} repo${projects.length === 1 ? '' : 's'}`
@@ -509,6 +509,16 @@ export class Hud {
     bits.push(`<span>${ago(thread.lastActivityAt)}</span>`)
     meta.innerHTML = bits.join('')
 
+    const details = taskDetailsFor(thread)
+    const summary = this.$('.thread-pop .summary')
+    summary.textContent = details.summary
+    summary.hidden = !details.summary
+    const rows = this.$('.thread-pop .details')
+    rows.innerHTML = details.rows
+      .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`)
+      .join('')
+    rows.hidden = details.rows.length === 0
+
     const pct = Math.round((this.actions.progressFor?.(thread.id) ?? 0) * 100)
     this.$('.thread-pop .progress > i').style.width = `${pct}%`
     this.$('.thread-pop .progress > i').style.background = hex(agent.trim.getHex())
@@ -517,6 +527,7 @@ export class Hud {
     // often is how a HUD starts costing frames.
     this._cardSize = { w: card.offsetWidth, h: card.offsetHeight }
     this.$('#btn-open').disabled = thread.canOpen === false
+    this.$('#btn-archive').disabled = thread.canArchive === false
   }
 
   /**
@@ -810,6 +821,27 @@ function ago(ts) {
   return `${Math.floor(s / 86400)}d ago`
 }
 
+export function taskDetailsFor(thread, relativeTime = ago) {
+  const summary = String(thread?.details?.body || thread?.preview || '').trim().slice(0, 600)
+  if (thread?.source !== 'native-kanban' || !thread.details) return { summary, rows: [] }
+  const details = thread.details
+  const rows = [
+    ['Task', details.taskId],
+    ['Kanban', details.kanbanStatus],
+    ['Attention', thread.attentionLabel],
+    ['Project', details.projectId || details.tenant || thread.project],
+    ['Workspace', details.workspace],
+    ['Worktree', thread.worktree],
+    ['Branch', details.branch],
+    ['Steward', details.steward],
+    ['Assignee', details.assignee || 'unassigned'],
+    ['Run profile', details.runProfile || 'none'],
+    ['Run state', details.runStatus || 'not running'],
+    ['Heartbeat', relativeTime(details.lastHeartbeatAt)],
+  ].filter(([, value]) => value)
+  return { summary, rows }
+}
+
 const TEMPLATE = `
 <aside class="side panel">
   <header class="brandbar">
@@ -875,6 +907,8 @@ const TEMPLATE = `
     </div>
     <button class="btn icon ghost" id="btn-deselect" title="Deselect (Esc)">${ICON.close}</button>
   </div>
+  <div class="summary"></div>
+  <dl class="details"></dl>
   <div class="progress"><i></i></div>
   <div class="pair">
     <button class="btn primary" id="btn-open" title="Open this thread in the harness it came from (Enter)">${ICON.open} Open</button>

@@ -1,121 +1,234 @@
+import { execFile as execFileCallback } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { promisify } from 'node:util'
 
-function databasePath() {
-  const configuredHome = process.env.HERMES_HOME || path.join(os.homedir(), '.hermes')
-  const hermesHome =
-    path.basename(path.dirname(configuredHome)) === 'profiles' ? path.dirname(path.dirname(configuredHome)) : configuredHome
-  return path.join(hermesHome, 'kanban', 'boards', 'native', 'kanban.db')
+const execFileAsync = promisify(execFileCallback)
+const TASK_ID = /^t_[A-Za-z0-9_-]+$/
+
+function configuredHome(env) {
+  return env.HERMES_HOME || path.join(os.homedir(), '.hermes')
+}
+
+function sharedHermesHome(env) {
+  const home = configuredHome(env)
+  return path.basename(path.dirname(home)) === 'profiles' ? path.dirname(path.dirname(home)) : home
+}
+
+function databasePath(env) {
+  return path.join(sharedHermesHome(env), 'kanban', 'boards', 'native', 'kanban.db')
+}
+
+function projectsPath(env) {
+  return path.join(configuredHome(env), 'projects.db')
 }
 
 const epochMilliseconds = (seconds) => (Number(seconds) || 0) * 1000
 
-async function detect() {
-  try {
-    await fsp.access(databasePath())
-    return true
-  } catch {
-    return false
+function attentionFor(status, blockKind) {
+  if (status === 'review') return { attention: 'review', attentionLabel: 'In review', requiresMorgan: false }
+  if (status !== 'blocked') return { attention: 'none', attentionLabel: '', requiresMorgan: false }
+  if (blockKind === 'needs_input' || blockKind === 'capability') {
+    return { attention: blockKind, attentionLabel: 'Requires Morgan', requiresMorgan: true }
   }
+  if (blockKind === 'dependency' || blockKind === 'transient') {
+    return { attention: blockKind, attentionLabel: 'Internal wait', requiresMorgan: false }
+  }
+  return { attention: 'blocked', attentionLabel: 'Blocked', requiresMorgan: false }
 }
 
-async function scanThreads() {
-  const db = new DatabaseSync(databasePath(), { readOnly: true })
-  try {
-    return db
-      .prepare(`
-        SELECT
-          t.id,
-          t.title,
-          t.body,
-          t.status,
-          t.block_kind,
-          t.assignee,
-          t.created_at,
-          t.started_at,
-          t.workspace_kind,
-          t.project_id,
-          t.tenant,
-          t.workspace_path,
-          t.branch_name,
-          r.profile AS run_profile,
-          r.status AS run_status,
-          r.started_at AS run_started_at
-        FROM tasks t
-        LEFT JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id
-        WHERE t.status IN ('ready', 'running', 'review', 'blocked')
-      `)
-      .all()
-      .map((task) => {
-        const workspaceName = String(task.workspace_path || '')
-          .split(/[\\/]/)
-          .filter(Boolean)
-          .at(-1)
-        const workspacePath = String(task.workspace_path || '')
-        const preview = String(task.body || '').replace(/\s+/g, ' ').trim().slice(0, 240)
-        return {
-          id: `hermes-kanban:${task.id}`,
-          title: String(task.title || 'Untitled task'),
-          preview,
-          project: String(task.project_id || task.tenant || workspaceName || 'Other'),
-          projectPath: workspacePath,
-          worktree: task.workspace_kind === 'worktree' ? String(workspaceName || '') : '',
-          cwd: workspacePath,
-          gitBranch: String(task.branch_name || ''),
-          model: 'Jynx',
-          effort: '',
-          createdAt: epochMilliseconds(task.created_at),
-          lastActivityAt: Math.max(
-            epochMilliseconds(task.run_started_at),
-            epochMilliseconds(task.started_at),
-            epochMilliseconds(task.created_at)
-          ),
-          lastFocusedAt: 0,
-          running: task.status === 'running',
-          unread: task.status === 'review',
-          hasError: task.status === 'blocked',
-          starred: false,
-          routine: '',
-          prState: '',
-          archived: false,
-          sizeBytes: Buffer.byteLength(String(task.body || '')),
-          source: 'native-kanban',
-          canOpen: false,
-          canArchive: false,
-          ref: {
-            taskId: String(task.id),
-            readOnly: true,
-            status: String(task.status),
-            attention:
-              task.status === 'review' ? 'review' : task.status === 'blocked' ? String(task.block_kind || 'blocked') : 'none',
-            steward: 'Jynx',
-            worker: {
-              assignee: String(task.assignee || ''),
-              profile: String(task.run_profile || ''),
-              runStatus: String(task.run_status || ''),
+function validSessionId(value) {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+export function createHermesKanban({ env = process.env, execFile = execFileAsync } = {}) {
+  async function detect() {
+    try {
+      await fsp.access(databasePath(env))
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async function scanProjects() {
+    const db = new DatabaseSync(projectsPath(env), { readOnly: true })
+    try {
+      return db
+        .prepare(`
+          SELECT id, slug, name, primary_path
+          FROM projects
+          WHERE archived = 0
+          ORDER BY slug, id
+        `)
+        .all()
+        .map((project) => ({
+          id: String(project.id),
+          slug: String(project.slug),
+          name: String(project.name),
+          path: String(project.primary_path || ''),
+        }))
+    } finally {
+      db.close()
+    }
+  }
+
+  async function scanThreads() {
+    const db = new DatabaseSync(databasePath(env), { readOnly: true })
+    try {
+      return db
+        .prepare(`
+          SELECT
+            t.id,
+            t.title,
+            t.body,
+            t.status,
+            t.block_kind,
+            t.assignee,
+            t.created_at,
+            t.started_at,
+            t.workspace_kind,
+            t.project_id,
+            t.tenant,
+            t.workspace_path,
+            t.branch_name,
+            t.last_heartbeat_at,
+            t.session_id,
+            r.profile AS run_profile,
+            r.status AS run_status,
+            r.started_at AS run_started_at,
+            r.last_heartbeat_at AS run_last_heartbeat_at
+          FROM tasks t
+          LEFT JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id
+          WHERE t.status IN ('ready', 'running', 'review', 'blocked')
+        `)
+        .all()
+        .map((task) => {
+          const taskId = String(task.id)
+          const threadId = `hermes-kanban:${taskId}`
+          const workspacePath = String(task.workspace_path || '')
+          const workspaceName = workspacePath.split(/[\\/]/).filter(Boolean).at(-1)
+          const body = String(task.body || '')
+          const preview = body.replace(/\s+/g, ' ').trim().slice(0, 240)
+          const sessionId = validSessionId(task.session_id) ? task.session_id : ''
+          const heartbeat = Math.max(
+            epochMilliseconds(task.run_last_heartbeat_at),
+            epochMilliseconds(task.last_heartbeat_at)
+          )
+          const attention = attentionFor(task.status, task.block_kind)
+          const worker = {
+            assignee: String(task.assignee || ''),
+            profile: String(task.run_profile || ''),
+            runStatus: String(task.run_status || ''),
+          }
+          return {
+            id: threadId,
+            title: String(task.title || 'Untitled task'),
+            preview,
+            project: String(task.project_id || task.tenant || workspaceName || 'Other'),
+            projectId: String(task.project_id || ''),
+            tenant: String(task.tenant || ''),
+            projectPath: workspacePath,
+            worktree: task.workspace_kind === 'worktree' ? String(workspaceName || '') : '',
+            cwd: workspacePath,
+            gitBranch: String(task.branch_name || ''),
+            model: 'Jynx',
+            effort: '',
+            createdAt: epochMilliseconds(task.created_at),
+            lastActivityAt: Math.max(
+              heartbeat,
+              epochMilliseconds(task.run_started_at),
+              epochMilliseconds(task.started_at),
+              epochMilliseconds(task.created_at)
+            ),
+            lastFocusedAt: 0,
+            running: task.status === 'running',
+            unread: false,
+            hasError: task.status === 'blocked',
+            starred: false,
+            routine: '',
+            prState: '',
+            archived: false,
+            sizeBytes: Buffer.byteLength(body),
+            source: 'native-kanban',
+            canOpen: Boolean(sessionId),
+            canArchive: true,
+            requiresMorgan: attention.requiresMorgan,
+            attentionLabel: attention.attentionLabel,
+            details: {
+              taskId,
+              body: body.slice(0, 600),
+              kanbanStatus: String(task.status),
+              projectId: String(task.project_id || ''),
+              tenant: String(task.tenant || ''),
+              workspace: workspacePath,
+              workspaceKind: String(task.workspace_kind || ''),
+              branch: String(task.branch_name || ''),
+              steward: 'Jynx',
+              assignee: worker.assignee,
+              runProfile: worker.profile,
+              runStatus: worker.runStatus,
+              lastHeartbeatAt: heartbeat,
             },
-          },
-        }
-      })
-  } finally {
-    db.close()
+            ref: {
+              taskId,
+              threadId,
+              board: 'native',
+              sessionId,
+              status: String(task.status),
+              attention: attention.attention,
+              steward: 'Jynx',
+              worker,
+            },
+          }
+        })
+    } finally {
+      db.close()
+    }
+  }
+
+  function openThread(ref) {
+    if (!validSessionId(ref?.sessionId)) return { ok: false, error: 'No managing Hermes session is available' }
+    return { ok: true, url: `hermes://open/${encodeURIComponent(ref.sessionId)}` }
+  }
+
+  async function setArchived(ref, archived) {
+    if (archived !== true) return { ok: false, error: 'Hermes Kanban unarchive is not supported' }
+    const taskId = ref?.taskId
+    if (
+      typeof taskId !== 'string' ||
+      !TASK_ID.test(taskId) ||
+      ref?.board !== 'native' ||
+      ref?.threadId !== `hermes-kanban:${taskId}`
+    ) {
+      return { ok: false, error: 'Invalid Hermes Kanban task reference' }
+    }
+
+    await execFile('hermes', ['kanban', '--board', 'native', 'archive', taskId])
+
+    const db = new DatabaseSync(databasePath(env), { readOnly: true })
+    try {
+      const task = db.prepare('SELECT status FROM tasks WHERE id = ?').get(taskId)
+      if (!task) throw new Error(`Archived task ${taskId} could not be read back from native board`)
+      if (task.status !== 'archived') throw new Error(`Archived task ${taskId} did not report archived status`)
+    } finally {
+      db.close()
+    }
+    return { ok: true, archived: true }
+  }
+
+  return {
+    id: 'hermes-kanban',
+    name: 'Hermes Kanban',
+    detect,
+    scanProjects,
+    scanThreads,
+    openThread,
+    newSession: () => ({ ok: false, error: 'Hermes Kanban cannot start conversations from Bot Crossing' }),
+    setArchived,
   }
 }
 
-const unsupported = () => ({ ok: false, error: 'Hermes Kanban is read-only in Bot Crossing' })
-
-async function setArchived() {
-  return unsupported()
-}
-
-export default {
-  id: 'hermes-kanban',
-  name: 'Hermes Kanban',
-  detect,
-  scanThreads,
-  openThread: unsupported,
-  newSession: unsupported,
-  setArchived,
-}
+export default createHermesKanban()

@@ -131,6 +131,12 @@ body {
   transform: scale(0.96);
 }
 
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  transform: none;
+}
+
 .btn.icon {
   padding: 0;
   width: 34px;
@@ -592,6 +598,43 @@ body {
   width: 7px;
   height: 7px;
   border-radius: 2px;
+}
+
+.thread-pop .summary {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+  max-height: 4.2em;
+  overflow: hidden;
+}
+
+.thread-pop .details {
+  margin: 0;
+  padding: 7px 0;
+  border-block: 1px solid var(--line);
+  display: grid;
+  gap: 4px;
+  max-height: 190px;
+  overflow-y: auto;
+  user-select: text;
+}
+
+.thread-pop .details > div {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 7px;
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+.thread-pop .details dt {
+  color: var(--dim);
+}
+
+.thread-pop .details dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 .thread-pop #btn-deselect {

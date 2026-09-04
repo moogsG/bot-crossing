@@ -13,6 +13,7 @@ const post = (url, payload) =>
   })
 
 export const fetchThreads = () => req('/api/threads')
+export const fetchProjects = () => req('/api/projects')
 export const fetchState = () => req('/api/state')
 
 export const saveState = (state) =>
