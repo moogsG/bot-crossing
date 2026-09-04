@@ -7,8 +7,9 @@
  * `server/harnesses/README.md`.
  */
 import claudeCode from './claude-code.mjs'
+import hermesKanban from './hermes-kanban.mjs'
 
-export const HARNESSES = [claudeCode]
+export const HARNESSES = [claudeCode, hermesKanban]
 
 export const harnessById = (id) => HARNESSES.find((h) => h.id === id) || null
 
