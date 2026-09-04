@@ -214,10 +214,10 @@ test('reads active projects from the profile-scoped HERMES_HOME without mutating
   assert.deepEqual(await fsp.readFile(path.join(profileHome, 'projects.db')), before)
 })
 
-test('scans only active native-board task statuses', async () => {
+test('keeps every non-archived native-board task as a durable building record', async () => {
   const { home, databasePath } = await fixtureHome()
   process.env.HERMES_HOME = home
-  for (const status of ['ready', 'running', 'review', 'blocked', 'todo', 'done', 'triage']) {
+  for (const status of ['ready', 'running', 'review', 'blocked', 'todo', 'done', 'triage', 'archived']) {
     insertTask(databasePath, { id: `t_${status}`, status, title: status })
   }
 
@@ -225,7 +225,15 @@ test('scans only active native-board task statuses', async () => {
 
   assert.deepEqual(
     threads.map(({ id }) => id).sort(),
-    ['hermes-kanban:t_blocked', 'hermes-kanban:t_ready', 'hermes-kanban:t_review', 'hermes-kanban:t_running']
+    [
+      'hermes-kanban:t_blocked',
+      'hermes-kanban:t_done',
+      'hermes-kanban:t_ready',
+      'hermes-kanban:t_review',
+      'hermes-kanban:t_running',
+      'hermes-kanban:t_todo',
+      'hermes-kanban:t_triage',
+    ]
   )
 })
 
@@ -553,6 +561,33 @@ test('exposes the bounded Kanban event vocabulary needed for actor lifecycle upd
     'archived',
   ])
   assert.equal(Object.isFrozen(ACTOR_EVENT_VOCABULARY), true)
+})
+
+test('tails ordered lifecycle events with a cursor while advancing past unrelated events', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  insertEvent(databasePath, { task_id: 't_live', run_id: 7, kind: 'claimed', payload: '{"source_status":"ready"}' })
+  insertEvent(databasePath, { task_id: 't_live', run_id: 7, kind: 'edited', payload: '{"title":"new"}' })
+  insertEvent(databasePath, { task_id: 't_live', run_id: 7, kind: 'heartbeat', payload: null })
+
+  const first = await hermesKanban.scanActorEvents(0)
+  const second = await hermesKanban.scanActorEvents(first.cursor)
+
+  assert.deepEqual(first, {
+    cursor: 3,
+    events: [
+      {
+        id: 1,
+        taskId: 't_live',
+        runId: 7,
+        kind: 'claimed',
+        payload: { source_status: 'ready' },
+        createdAt: 110000,
+      },
+      { id: 3, taskId: 't_live', runId: 7, kind: 'heartbeat', payload: null, createdAt: 110000 },
+    ],
+  })
+  assert.deepEqual(second, { cursor: 3, events: [] })
 })
 
 test('opens only valid managing sessions with the supported encoded desktop deep link', () => {

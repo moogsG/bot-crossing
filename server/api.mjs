@@ -4,12 +4,14 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
+  actorEventCursor,
   defaultHarness,
   harnessAppStartedAt,
   harnessStatus,
   newSession as harnessNewSession,
   openThread as harnessOpenThread,
   scanActors,
+  scanActorEvents,
   scanProjects,
   scanThreads,
   setThreadArchived,
@@ -259,9 +261,15 @@ export async function apiMiddleware(req, res, next) {
     if (url.pathname === '/api/actors' && req.method === 'GET') {
       return send(res, 200, {
         actors: await scanActors(),
+        cursor: await actorEventCursor(),
         eventVocabulary: ACTOR_EVENT_VOCABULARY,
         scannedAt: Date.now(),
       })
+    }
+
+    if (url.pathname === '/api/events' && req.method === 'GET') {
+      const since = Math.max(0, Number(url.searchParams.get('since')) || 0)
+      return send(res, 200, await scanActorEvents(since))
     }
 
     if (url.pathname === '/api/harnesses' && req.method === 'GET') {

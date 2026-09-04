@@ -95,5 +95,31 @@ test('GET /api/actors returns normalized snapshots and the explicit lifecycle ev
   assert.equal(result.body.actors[0].taskId, 't_api')
   assert.equal(result.body.actors[0].runId, 7)
   assert.equal(result.body.actors[0].harness, 'hermes-kanban')
+  assert.equal(result.body.cursor, 0)
   assert.equal(typeof result.body.scannedAt, 'number')
+})
+
+test('GET /api/events returns an ordered no-store lifecycle cursor', async () => {
+  const home = await actorFixtureHome()
+  process.env.HERMES_HOME = home
+  const db = new DatabaseSync(path.join(home, 'kanban', 'boards', 'native', 'kanban.db'))
+  db.exec(`
+    INSERT INTO task_events (task_id, run_id, kind, payload, created_at)
+    VALUES ('t_api', 7, 'claimed', '{"source_status":"ready"}', 101),
+           ('t_api', 7, 'heartbeat', NULL, 102)
+  `)
+  db.close()
+  const capture = responseCapture()
+  const request = { url: '/api/events?since=0', method: 'GET', headers: { host: 'localhost:5274' } }
+
+  await apiMiddleware(request, capture.response)
+
+  const result = capture.result()
+  assert.equal(result.status, 200)
+  assert.equal(result.headers['Cache-Control'], 'no-store')
+  assert.equal(result.body.cursor, 2)
+  assert.deepEqual(result.body.events.map(({ id, kind }) => [id, kind]), [
+    [1, 'claimed'],
+    [2, 'heartbeat'],
+  ])
 })

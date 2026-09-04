@@ -526,7 +526,16 @@ export class Hud {
     // astronaut needs its size sixty times a second, and asking the layout for it that
     // often is how a HUD starts costing frames.
     this._cardSize = { w: card.offsetWidth, h: card.offsetHeight }
-    this.$('#btn-open').disabled = thread.canOpen === false
+    const actorSession = agent.actor?.managingSession
+    const canOpen = actorSession
+      ? actorSession.canOpen === true && typeof actorSession.id === 'string' && Boolean(actorSession.id.trim())
+      : thread.canOpen !== false
+    this.$('#btn-open').disabled = !canOpen
+    this.$('#btn-open').title = canOpen
+      ? agent.actor
+        ? 'Open this run’s managing Hermes session'
+        : 'Open this task’s managing Hermes session'
+      : 'Managing Hermes session unavailable'
     this.$('#btn-archive').disabled = thread.canArchive === false
   }
 

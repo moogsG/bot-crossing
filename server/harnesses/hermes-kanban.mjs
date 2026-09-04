@@ -170,7 +170,7 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
             r.last_heartbeat_at AS run_last_heartbeat_at
           FROM tasks t
           LEFT JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id
-          WHERE t.status IN ('ready', 'running', 'review', 'blocked')
+          WHERE t.status <> 'archived'
         `)
         .all()
     } finally {
@@ -333,6 +333,55 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
     return actors
   }
 
+  /** Ordered native lifecycle tail. Unknown events advance the cursor but never reach the UI. */
+  async function scanActorEvents(since = 0) {
+    const cursor = Math.max(0, Number(since) || 0)
+    const db = new DatabaseSync(databasePath(env), { readOnly: true })
+    try {
+      const rows = db
+        .prepare(`
+          SELECT id, task_id, run_id, kind, payload, created_at
+          FROM task_events
+          WHERE id > ?
+          ORDER BY id ASC
+          LIMIT 200
+        `)
+        .all(cursor)
+      let nextCursor = cursor
+      const events = []
+      for (const row of rows) {
+        nextCursor = Number(row.id)
+        if (!ACTOR_EVENT_VOCABULARY.includes(row.kind)) continue
+        let payload = null
+        try {
+          payload = row.payload ? JSON.parse(row.payload) : null
+        } catch {
+          payload = null
+        }
+        events.push({
+          id: Number(row.id),
+          taskId: String(row.task_id),
+          runId: row.run_id === null ? null : Number(row.run_id),
+          kind: String(row.kind),
+          payload,
+          createdAt: epochMilliseconds(row.created_at),
+        })
+      }
+      return { cursor: nextCursor, events }
+    } finally {
+      db.close()
+    }
+  }
+
+  async function actorEventCursor() {
+    const db = new DatabaseSync(databasePath(env), { readOnly: true })
+    try {
+      return Number(db.prepare('SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events').get().cursor)
+    } finally {
+      db.close()
+    }
+  }
+
   function openThread(ref) {
     if (!validSessionId(ref?.sessionId)) return { ok: false, error: 'No managing Hermes session is available' }
     return { ok: true, url: `hermes://open/${encodeURIComponent(ref.sessionId)}` }
@@ -370,6 +419,8 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
     scanProjects,
     scanThreads,
     scanActors,
+    scanActorEvents,
+    actorEventCursor,
     openThread,
     newSession: () => ({ ok: false, error: 'Hermes Kanban cannot start conversations from Bot Crossing' }),
     setArchived,

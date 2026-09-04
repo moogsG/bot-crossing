@@ -129,6 +129,19 @@ export async function scanActors() {
   return scanActorSnapshotsFrom(await detectedHarnesses())
 }
 
+/** Native event ids are board-local, so exactly one detected harness owns this cursor. */
+export async function scanActorEvents(since) {
+  const harnesses = await detectedHarnesses()
+  const harness = harnesses.find((entry) => entry.scanActorEvents)
+  return harness ? harness.scanActorEvents(since) : { cursor: Math.max(0, Number(since) || 0), events: [] }
+}
+
+export async function actorEventCursor() {
+  const harnesses = await detectedHarnesses()
+  const harness = harnesses.find((entry) => entry.actorEventCursor)
+  return harness ? harness.actorEventCursor() : 0
+}
+
 /** What the HUD shows in the harness list: who is installed, and what they can do. */
 export async function harnessStatus() {
   const detected = new Set((await detectedHarnesses()).map((h) => h.id))
