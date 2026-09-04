@@ -69,6 +69,12 @@ export function statusFor(thread, now = Date.now()) {
   return 'idle'
 }
 
+/** Native Kanban tasks declare Morgan attention explicitly; older harnesses retain their badges. */
+export function wantsMorganAttention(thread, status) {
+  if (thread?.source === 'native-kanban') return thread.requiresMorgan === true
+  return status === 'waiting' || status === 'blocked'
+}
+
 /**
  * Which behaviours earn a badge. Dormant and idle deliberately get none: their pose and
  * face already say it, and with most of a real thread list sitting quiet, a badge over
@@ -331,7 +337,7 @@ export class Colony {
       list.forEach((thread, i) => {
         const status = statusFor(thread, now)
         if (stats[status] !== undefined) stats[status]++
-        if (status === 'waiting' || status === 'blocked') urgent.add(plot.id)
+        if (wantsMorganAttention(thread, status)) urgent.add(plot.id)
         if (status === 'waiting' || status === 'blocked' || status === 'working') active.add(plot.id)
         stats.agents++
 

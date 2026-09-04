@@ -3,7 +3,14 @@ import './ui/styles.css'
 import { DEFAULT_PRESET, Settings, hasStoredSettings } from './core/settings.js'
 import { Engine } from './core/engine.js'
 import { CameraRig } from './core/camera.js'
-import { Colony, STATUS_LABEL, STATUS_ORDER, statusFor, transcriptProgress } from './game/colony.js'
+import {
+  Colony,
+  STATUS_LABEL,
+  STATUS_ORDER,
+  statusFor,
+  transcriptProgress,
+  wantsMorganAttention,
+} from './game/colony.js'
 import { Hud } from './ui/hud.js'
 import { PLANETS } from './world/planet.js'
 import { loadKit } from './world/kit.js'
@@ -332,13 +339,17 @@ function syncProject() {
   const now = Date.now()
   const list = [...colony.threads.values()]
     .filter((thread) => thread.project === plot.id)
-    .map((thread) => ({
-      id: thread.id,
-      title: thread.title,
-      worktree: thread.worktree,
-      lastActivityAt: thread.lastActivityAt,
-      status: statusFor(thread, now),
-    }))
+    .map((thread) => {
+      const status = statusFor(thread, now)
+      return {
+        id: thread.id,
+        title: thread.title,
+        worktree: thread.worktree,
+        lastActivityAt: thread.lastActivityAt,
+        status,
+        requiresMorgan: wantsMorganAttention(thread, status),
+      }
+    })
     // Whoever wants something first, then most recently touched — the same order of
     // importance the badges use above their heads.
     .sort((a, b) => {

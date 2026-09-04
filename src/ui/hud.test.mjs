@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { createServer } from 'vite'
 
 const vite = await createServer({ server: { middlewareMode: true, hmr: false }, appType: 'custom' })
-const { taskDetailsFor } = await vite.ssrLoadModule('/src/ui/hud.js')
+const { morganAttentionCount, taskDetailsFor } = await vite.ssrLoadModule('/src/ui/hud.js')
 await vite.close()
 
 test('Hermes task detail rows expose operational fields and an honest never heartbeat', () => {
@@ -53,4 +53,19 @@ test('non-Hermes cards keep their preview without task-only rows', () => {
     summary: 'Existing preview',
     rows: [],
   })
+})
+
+test('project summary counts only explicit Morgan attention and preserves legacy waiting cards', () => {
+  assert.equal(
+    morganAttentionCount([
+      { status: 'blocked', requiresMorgan: true },
+      { status: 'blocked', requiresMorgan: true },
+      { status: 'blocked', requiresMorgan: false },
+      { status: 'blocked', requiresMorgan: false },
+      { status: 'blocked', requiresMorgan: false },
+      { status: 'idle', requiresMorgan: false },
+      { status: 'waiting' },
+    ]),
+    3
+  )
 })

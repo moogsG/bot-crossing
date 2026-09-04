@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { createServer } from 'vite'
 
 const vite = await createServer({ server: { middlewareMode: true, hmr: false }, appType: 'custom' })
-const { projectGroups } = await vite.ssrLoadModule('/src/game/colony.js')
+const { projectGroups, wantsMorganAttention } = await vite.ssrLoadModule('/src/game/colony.js')
 await vite.close()
 
 test('known projects persist without agents and matching tasks share their stable zone', () => {
@@ -59,4 +59,22 @@ test('archived tasks do not create agents or fallback zones', () => {
   )
 
   assert.deepEqual(groups, [{ id: 'perch', name: 'Perch', path: '/work/perch', threads: [] }])
+})
+
+test('only explicit Hermes attention makes a task Morgan-facing while legacy waits stay compatible', () => {
+  const attentionClasses = [
+    ['needs_input', { source: 'native-kanban', requiresMorgan: true }, 'blocked', true],
+    ['capability', { source: 'native-kanban', requiresMorgan: true }, 'blocked', true],
+    ['dependency', { source: 'native-kanban', requiresMorgan: false }, 'blocked', false],
+    ['transient', { source: 'native-kanban', requiresMorgan: false }, 'blocked', false],
+    ['generic blocked', { source: 'native-kanban', requiresMorgan: false }, 'blocked', false],
+    ['review', { source: 'native-kanban', requiresMorgan: false }, 'idle', false],
+    ['legacy waiting', { source: 'desktop' }, 'waiting', true],
+    ['legacy blocked', { source: 'desktop' }, 'blocked', true],
+  ]
+
+  assert.deepEqual(
+    attentionClasses.map(([label, thread, status]) => [label, wantsMorganAttention(thread, status)]),
+    attentionClasses.map(([label, , , expected]) => [label, expected])
+  )
 })

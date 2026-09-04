@@ -438,7 +438,7 @@ export class Hud {
     this.$('#btn-copy-path').disabled = !project.path
 
     const n = project.threads.length
-    const waiting = project.threads.filter((t) => t.status === 'waiting' || t.status === 'blocked').length
+    const waiting = morganAttentionCount(project.threads)
     this.$('.side .threads-head').innerHTML =
       `<span>${n} thread${n === 1 ? '' : 's'}</span>` + (waiting ? `<span class="want">${waiting} need you</span>` : '')
 
@@ -819,6 +819,13 @@ function ago(ts) {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`
   return `${Math.floor(s / 86400)}d ago`
+}
+
+export function morganAttentionCount(threads) {
+  return threads.filter((thread) => {
+    if (typeof thread.requiresMorgan === 'boolean') return thread.requiresMorgan
+    return thread.status === 'waiting' || thread.status === 'blocked'
+  }).length
 }
 
 export function taskDetailsFor(thread, relativeTime = ago) {
