@@ -4,21 +4,37 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
+  actorEventCursor,
   defaultHarness,
   harnessAppStartedAt,
   harnessStatus,
   newSession as harnessNewSession,
   openThread as harnessOpenThread,
+  scanActors,
+  scanActorEvents,
   scanProjects,
   scanThreads,
   setThreadArchived,
 } from './scan.mjs'
+import { ACTOR_EVENT_VOCABULARY } from './harnesses/hermes-kanban.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.BOT_CROSSING_DATA || path.join(here, '..', 'data')
 const STATE_FILE = path.join(DATA_DIR, 'colony.json')
 
 const STATE_VERSION = 1
+
+export async function readActorSnapshot({ readCursor = actorEventCursor, readActors = scanActors } = {}) {
+  const cursor = await readCursor()
+  let scanCursor = cursor
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const actors = await readActors()
+    const through = await readCursor()
+    if (through === scanCursor) return { actors, cursor, through }
+    scanCursor = through
+  }
+  throw new Error('Lifecycle events kept changing during the actor snapshot')
+}
 
 /**
  * Colony state is only ever the things the *game* invents — which plot a project got,
@@ -252,6 +268,20 @@ export async function apiMiddleware(req, res, next) {
     if (url.pathname === '/api/threads' && req.method === 'GET') {
       const threads = await reconcileArchived(await scanThreads())
       return send(res, 200, { threads, scannedAt: Date.now() })
+    }
+
+    if (url.pathname === '/api/actors' && req.method === 'GET') {
+      const snapshot = await readActorSnapshot()
+      return send(res, 200, {
+        ...snapshot,
+        eventVocabulary: ACTOR_EVENT_VOCABULARY,
+        scannedAt: Date.now(),
+      })
+    }
+
+    if (url.pathname === '/api/events' && req.method === 'GET') {
+      const since = Math.max(0, Number(url.searchParams.get('since')) || 0)
+      return send(res, 200, await scanActorEvents(since))
     }
 
     if (url.pathname === '/api/harnesses' && req.method === 'GET') {

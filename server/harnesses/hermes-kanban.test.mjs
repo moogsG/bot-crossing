@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 import { promisify } from 'node:util'
 
-import hermesKanban, { createHermesKanban } from './hermes-kanban.mjs'
+import hermesKanban, { ACTOR_EVENT_VOCABULARY, createHermesKanban } from './hermes-kanban.mjs'
 import { HARNESSES } from './index.mjs'
 
 const temporaryHomes = []
@@ -49,6 +49,14 @@ async function fixtureHome() {
       started_at INTEGER NOT NULL,
       ended_at INTEGER,
       last_heartbeat_at INTEGER
+    );
+    CREATE TABLE task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL,
+      run_id INTEGER,
+      kind TEXT NOT NULL,
+      payload TEXT,
+      created_at INTEGER NOT NULL
     );
   `)
   db.close()
@@ -128,6 +136,23 @@ function insertRun(databasePath, overrides = {}) {
   db.close()
 }
 
+function insertEvent(databasePath, overrides = {}) {
+  const event = {
+    task_id: 't_default',
+    run_id: 1,
+    kind: 'claimed',
+    payload: null,
+    created_at: 110,
+    ...overrides,
+  }
+  const db = new DatabaseSync(databasePath)
+  db.prepare(`
+    INSERT INTO task_events (task_id, run_id, kind, payload, created_at)
+    VALUES ($task_id, $run_id, $kind, $payload, $created_at)
+  `).run(event)
+  db.close()
+}
+
 async function gitRepositoryFixture() {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'bot-crossing-repository-'))
   temporaryHomes.push(root)
@@ -189,10 +214,10 @@ test('reads active projects from the profile-scoped HERMES_HOME without mutating
   assert.deepEqual(await fsp.readFile(path.join(profileHome, 'projects.db')), before)
 })
 
-test('scans only active native-board task statuses', async () => {
+test('keeps every non-archived native-board task as a durable building record', async () => {
   const { home, databasePath } = await fixtureHome()
   process.env.HERMES_HOME = home
-  for (const status of ['ready', 'running', 'review', 'blocked', 'todo', 'done', 'triage']) {
+  for (const status of ['ready', 'running', 'review', 'blocked', 'todo', 'done', 'triage', 'archived']) {
     insertTask(databasePath, { id: `t_${status}`, status, title: status })
   }
 
@@ -200,7 +225,15 @@ test('scans only active native-board task statuses', async () => {
 
   assert.deepEqual(
     threads.map(({ id }) => id).sort(),
-    ['hermes-kanban:t_blocked', 'hermes-kanban:t_ready', 'hermes-kanban:t_review', 'hermes-kanban:t_running']
+    [
+      'hermes-kanban:t_blocked',
+      'hermes-kanban:t_done',
+      'hermes-kanban:t_ready',
+      'hermes-kanban:t_review',
+      'hermes-kanban:t_running',
+      'hermes-kanban:t_todo',
+      'hermes-kanban:t_triage',
+    ]
   )
 })
 
@@ -421,6 +454,162 @@ test('maps task details and heartbeat without consulting run end time', async ()
     lastHeartbeatAt: 150000,
   })
   assert.equal(JSON.stringify(thread).includes('999999'), false)
+})
+
+test('normalizes an active review claim into one stable task-linked reviewing actor', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  insertTask(databasePath, {
+    id: 't_actor',
+    assignee: 'reviewer',
+    status: 'running',
+    current_run_id: 42,
+    block_kind: 'needs_input',
+    last_heartbeat_at: 995,
+    session_id: 'managing/session',
+  })
+  insertRun(databasePath, {
+    id: 42,
+    task_id: 't_actor',
+    profile: 'reviewer',
+    status: 'running',
+    started_at: 900,
+    last_heartbeat_at: null,
+  })
+  insertEvent(databasePath, {
+    task_id: 't_actor',
+    run_id: 42,
+    payload: JSON.stringify({ run_id: 42, source_status: 'review' }),
+  })
+  const adapter = createHermesKanban({ now: () => 1_000_000 })
+
+  const first = await adapter.scanActors()
+  const second = await adapter.scanActors()
+
+  assert.deepEqual(first, [
+    {
+      id: 'hermes-kanban:actor:t_actor:42',
+      taskId: 't_actor',
+      runId: 42,
+      profile: 'reviewer',
+      lifecycleState: 'reviewing',
+      heartbeat: { lastAt: 995000, freshness: 'fresh' },
+      requiresMorgan: false,
+      managingSession: { id: 'managing/session', canOpen: true },
+      steward: 'Jynx',
+    },
+  ])
+  assert.deepEqual(second, first)
+})
+
+test('disables actor navigation when active runs share a non-unique managing session', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  for (const [id, runId, profile] of [['t_builder', 41, 'builder'], ['t_reviewer', 42, 'reviewer']]) {
+    insertTask(databasePath, {
+      id,
+      assignee: profile,
+      status: 'running',
+      current_run_id: runId,
+      session_id: 'shared-session',
+    })
+    insertRun(databasePath, { id: runId, task_id: id, profile, status: 'running' })
+  }
+
+  const actors = await createHermesKanban().scanActors()
+
+  assert.deepEqual(actors.map(({ managingSession }) => managingSession), [
+    { id: 'shared-session', canOpen: false },
+    { id: 'shared-session', canOpen: false },
+  ])
+})
+
+test('classifies actor lifecycle and heartbeat from task and current-run records only', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  insertTask(databasePath, { id: 't_working', status: 'running', current_run_id: 1 })
+  insertRun(databasePath, { id: 1, task_id: 't_working', status: 'running', last_heartbeat_at: 700 })
+  insertTask(databasePath, {
+    id: 't_waiting',
+    status: 'blocked',
+    block_kind: 'dependency',
+    current_run_id: 2,
+  })
+  insertRun(databasePath, { id: 2, task_id: 't_waiting', status: 'blocked', last_heartbeat_at: null })
+  insertEvent(databasePath, {
+    task_id: 't_waiting',
+    run_id: 2,
+    payload: JSON.stringify({ run_id: 2, source_status: 'review' }),
+  })
+  insertTask(databasePath, {
+    id: 't_morgan',
+    status: 'blocked',
+    block_kind: 'capability',
+    current_run_id: 3,
+  })
+  insertRun(databasePath, { id: 3, task_id: 't_morgan', status: 'blocked', last_heartbeat_at: 999 })
+  insertTask(databasePath, { id: 't_completed', status: 'done', current_run_id: 4 })
+  insertRun(databasePath, { id: 4, task_id: 't_completed', status: 'done', ended_at: 999 })
+  insertEvent(databasePath, {
+    task_id: 't_completed',
+    run_id: 4,
+    payload: JSON.stringify({ run_id: 4, source_status: 'review' }),
+  })
+  insertTask(databasePath, { id: 't_absent', status: 'running' })
+  insertRun(databasePath, { id: 5, task_id: 't_absent', status: 'running', last_heartbeat_at: 999 })
+  const adapter = createHermesKanban({ now: () => 1_000_000 })
+
+  const actors = Object.fromEntries((await adapter.scanActors()).map((actor) => [actor.taskId, actor]))
+
+  assert.deepEqual(Object.keys(actors).sort(), ['t_completed', 't_morgan', 't_waiting', 't_working'])
+  assert.equal(actors.t_working.lifecycleState, 'working')
+  assert.deepEqual(actors.t_working.heartbeat, { lastAt: 700000, freshness: 'stale' })
+  assert.equal(actors.t_waiting.lifecycleState, 'waiting')
+  assert.deepEqual(actors.t_waiting.heartbeat, { lastAt: 0, freshness: 'missing' })
+  assert.equal(actors.t_waiting.requiresMorgan, false)
+  assert.equal(actors.t_morgan.requiresMorgan, true)
+  assert.equal(actors.t_completed.lifecycleState, 'completed')
+  assert.deepEqual(actors.t_completed.managingSession, { id: '', canOpen: false })
+})
+
+test('exposes the bounded Kanban event vocabulary needed for actor lifecycle updates', () => {
+  assert.deepEqual(ACTOR_EVENT_VOCABULARY, [
+    'claimed',
+    'heartbeat',
+    'blocked',
+    'review_requested',
+    'changes_requested',
+    'completed',
+    'archived',
+  ])
+  assert.equal(Object.isFrozen(ACTOR_EVENT_VOCABULARY), true)
+})
+
+test('tails ordered lifecycle events with a cursor while advancing past unrelated events', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  insertEvent(databasePath, { task_id: 't_live', run_id: 7, kind: 'claimed', payload: '{"source_status":"ready"}' })
+  insertEvent(databasePath, { task_id: 't_live', run_id: 7, kind: 'edited', payload: '{"title":"new"}' })
+  insertEvent(databasePath, { task_id: 't_live', run_id: 7, kind: 'heartbeat', payload: null })
+
+  const first = await hermesKanban.scanActorEvents(0)
+  const second = await hermesKanban.scanActorEvents(first.cursor)
+
+  assert.deepEqual(first, {
+    cursor: 3,
+    events: [
+      {
+        id: 1,
+        taskId: 't_live',
+        runId: 7,
+        kind: 'claimed',
+        payload: { source_status: 'ready' },
+        createdAt: 110000,
+      },
+      { id: 3, taskId: 't_live', runId: 7, kind: 'heartbeat', payload: null, createdAt: 110000 },
+    ],
+  })
+  assert.deepEqual(second, { cursor: 3, events: [] })
 })
 
 test('opens only valid managing sessions with the supported encoded desktop deep link', () => {

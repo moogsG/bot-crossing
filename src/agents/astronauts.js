@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
 import { buildFaceAtlas, FACE, FACE_LOOPS, FRAME_COLS, FRAME_ROWS } from './faces.js'
 import { attachMatrixAt, decorateSkinned, frameFor } from './crew.js'
+import { standingClipFor } from '../game/actor-lifecycle.js'
 
 /**
  * Every astronaut in the colony, drawn in seven draw calls.
@@ -31,6 +32,9 @@ const SUIT_TONES = [0xf3f1ec, 0xe8e4dc, 0xf7f4ee, 0xdfe4e8, 0xf1e9df]
 /** Trim + eye colour per behaviour. Eyes are pushed past 1.0 so the bloom pass catches them. */
 const AGENT_LOOK = {
   working: { trim: 0x4f9a63, eye: [0.35, 2.5, 1.15] },
+  reviewing: { trim: 0xc08b45, eye: [2.1, 1.5, 0.55] },
+  'internal-wait': { trim: 0x748092, eye: [0.75, 1.0, 1.35] },
+  'requires-morgan': { trim: 0x4f7ec9, eye: [0.45, 1.5, 3.0] },
   waiting: { trim: 0x4f7ec9, eye: [0.45, 1.5, 3.0] },
   blocked: { trim: 0xc94f4f, eye: [3.0, 0.5, 0.45] },
   celebrating: { trim: 0xc9a24f, eye: [2.9, 2.1, 0.6] },
@@ -483,6 +487,9 @@ export class Astronauts {
     const agent = {
       id: entry.id,
       thread: entry.thread,
+      actor: entry.actor || null,
+      role: entry.role || 'worker',
+      stewardSignal: entry.stewardSignal === true,
       status: entry.status,
       site: entry.site ? entry.site.clone() : new THREE.Vector3(),
       // The thing being worked on, and where round it this astronaut is standing to do it.
@@ -544,6 +551,9 @@ export class Astronauts {
 
   _updateAgent(agent, entry) {
     agent.thread = entry.thread
+    agent.actor = entry.actor || null
+    agent.role = entry.role || 'worker'
+    agent.stewardSignal = entry.stewardSignal === true
     if (entry.site) {
       const moved = Math.hypot(entry.site.x - agent.site.x, entry.site.z - agent.site.z) > 0.05
       agent.site.copy(entry.site)
@@ -711,7 +721,8 @@ export class Astronauts {
           // velocity is a number only the animation reads, and what it says is "still
           // walking" for a third of a second after the astronaut has visibly stopped.
           agent.vel.set(0, 0, 0)
-          if (agent.status !== 'sleeping') this._faceToward(agent, agent.site, dt)
+          if (agent.status === 'reviewing' && agent.anchor) this._faceToward(agent, agent.anchor, dt)
+          else if (agent.status !== 'sleeping') this._faceToward(agent, agent.site, dt)
           this._settle(agent, dt)
         }
         this._sitePose(agent, dt, elapsed, anim)
@@ -984,7 +995,10 @@ export class Astronauts {
    */
   _sitePose(agent, dt, elapsed, anim) {
     agent.hop = 0
-    if (agent.status === 'celebrating') agent.targetYaw += dt * 1.4 * anim
+    if (agent.status === 'celebrating') {
+      agent.targetYaw += dt * 1.4 * anim
+      agent.hop = 0.22
+    }
   }
 
   /** Pick this frame's face: a status loop, interrupted by the agent's own blink clock. */
@@ -1042,36 +1056,14 @@ export class Astronauts {
     let key
     if (agent.state === 'spawning') key = 'spawn'
     else if (speed > 0.12) key = speed > WALK_SPEED * 1.25 ? 'run' : 'walk'
-    else {
-      switch (agent.status) {
-        case 'working':
-          key = 'work'
-          break
-        case 'waiting':
-          key = 'wave'
-          break
-        case 'blocked':
-          key = 'hit'
-          break
-        case 'celebrating':
-          key = 'cheer'
-          break
-        // Sitting down is a one-shot that hands over to the loop when it finishes, so an
-        // agent that has just nodded off lowers itself rather than snapping into a sit.
-        case 'sleeping':
-          key = agent.clipKey === 'sit' ? 'sit' : 'sitDown'
-          break
-        default:
-          key = 'idle'
-      }
-    }
+    else key = standingClipFor(agent)
 
     if (key !== agent.clipKey) {
       agent.clipKey = key
       agent.clipTime = 0
     }
 
-    const clip = rig.clips[key] || rig.clips.idle
+    const clip = rig.clips[key] || (key === 'work' ? rig.clips.workAlt : null) || rig.clips.idle
     if (!clip) return
 
     // Stride rate follows the ground, everything else runs at its authored speed.

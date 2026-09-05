@@ -7,6 +7,17 @@ import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFileCallback)
 const TASK_ID = /^t_[A-Za-z0-9_-]+$/
+const FRESH_HEARTBEAT_MS = 2 * 60 * 1000
+
+export const ACTOR_EVENT_VOCABULARY = Object.freeze([
+  'claimed',
+  'heartbeat',
+  'blocked',
+  'review_requested',
+  'changes_requested',
+  'completed',
+  'archived',
+])
 
 function configuredHome(env) {
   return env.HERMES_HOME || path.join(os.homedir(), '.hermes')
@@ -41,6 +52,26 @@ function attentionFor(status, blockKind) {
 
 function validSessionId(value) {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function actorLifecycleState(taskStatus, runStatus, claimedFromReview) {
+  if (taskStatus === 'done' || taskStatus === 'archived' || runStatus === 'done' || runStatus === 'released') {
+    return 'completed'
+  }
+  if (taskStatus === 'blocked' || taskStatus === 'todo' || runStatus === 'blocked') return 'waiting'
+  if (taskStatus === 'review' || (taskStatus === 'running' && runStatus === 'running' && claimedFromReview)) {
+    return 'reviewing'
+  }
+  if (runStatus === 'running') return 'working'
+  return null
+}
+
+function actorHeartbeat(lastAt, now) {
+  if (!lastAt) return { lastAt: 0, freshness: 'missing' }
+  return {
+    lastAt,
+    freshness: Math.max(0, now - lastAt) <= FRESH_HEARTBEAT_MS ? 'fresh' : 'stale',
+  }
 }
 
 const normalizedPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
@@ -79,7 +110,7 @@ async function repositoryFor(workspacePath, fallback, execFile) {
   }
 }
 
-export function createHermesKanban({ env = process.env, execFile = execFileAsync } = {}) {
+export function createHermesKanban({ env = process.env, execFile = execFileAsync, now = Date.now } = {}) {
   async function detect() {
     try {
       await fsp.access(databasePath(env))
@@ -139,7 +170,7 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
             r.last_heartbeat_at AS run_last_heartbeat_at
           FROM tasks t
           LEFT JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id
-          WHERE t.status IN ('ready', 'running', 'review', 'blocked')
+          WHERE t.status <> 'archived'
         `)
         .all()
     } finally {
@@ -238,6 +269,127 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
     )
   }
 
+  async function scanActors() {
+    const db = new DatabaseSync(databasePath(env), { readOnly: true })
+    let rows
+    try {
+      rows = db
+        .prepare(`
+          SELECT
+            t.id AS task_id,
+            t.status AS task_status,
+            t.block_kind,
+            t.last_heartbeat_at AS task_last_heartbeat_at,
+            t.session_id,
+            r.id AS run_id,
+            r.profile,
+            r.status AS run_status,
+            r.last_heartbeat_at AS run_last_heartbeat_at,
+            (
+              SELECT e.payload
+              FROM task_events e
+              WHERE e.task_id = t.id AND e.run_id = r.id AND e.kind = 'claimed'
+              ORDER BY e.id DESC
+              LIMIT 1
+            ) AS claimed_payload
+          FROM tasks t
+          INNER JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id
+          ORDER BY t.id, r.id
+        `)
+        .all()
+    } finally {
+      db.close()
+    }
+
+    const actors = []
+    for (const row of rows) {
+      let claimedFromReview = false
+      try {
+        claimedFromReview = JSON.parse(row.claimed_payload || 'null')?.source_status === 'review'
+      } catch {
+        // Missing or malformed lifecycle metadata cannot truthfully establish review provenance.
+      }
+      const lifecycleState = actorLifecycleState(row.task_status, row.run_status, claimedFromReview)
+      if (!lifecycleState) continue
+      const taskId = String(row.task_id)
+      const runId = Number(row.run_id)
+      const sessionId = validSessionId(row.session_id) ? row.session_id : ''
+      const heartbeatAt = Math.max(
+        epochMilliseconds(row.run_last_heartbeat_at),
+        epochMilliseconds(row.task_last_heartbeat_at)
+      )
+      actors.push({
+        id: `hermes-kanban:actor:${taskId}:${runId}`,
+        taskId,
+        runId,
+        profile: String(row.profile || ''),
+        lifecycleState,
+        heartbeat: actorHeartbeat(heartbeatAt, now()),
+        requiresMorgan: attentionFor(row.task_status, row.block_kind).requiresMorgan,
+        managingSession: { id: sessionId, canOpen: Boolean(sessionId) },
+        steward: 'Jynx',
+      })
+    }
+    const sessionCounts = new Map()
+    for (const actor of actors) {
+      const sessionId = actor.managingSession.id
+      if (sessionId) sessionCounts.set(sessionId, (sessionCounts.get(sessionId) || 0) + 1)
+    }
+    for (const actor of actors) {
+      if ((sessionCounts.get(actor.managingSession.id) || 0) > 1) actor.managingSession.canOpen = false
+    }
+    return actors
+  }
+
+  /** Ordered native lifecycle tail. Unknown events advance the cursor but never reach the UI. */
+  async function scanActorEvents(since = 0) {
+    const cursor = Math.max(0, Number(since) || 0)
+    const db = new DatabaseSync(databasePath(env), { readOnly: true })
+    try {
+      const rows = db
+        .prepare(`
+          SELECT id, task_id, run_id, kind, payload, created_at
+          FROM task_events
+          WHERE id > ?
+          ORDER BY id ASC
+          LIMIT 200
+        `)
+        .all(cursor)
+      let nextCursor = cursor
+      const events = []
+      for (const row of rows) {
+        nextCursor = Number(row.id)
+        if (!ACTOR_EVENT_VOCABULARY.includes(row.kind)) continue
+        let payload = null
+        try {
+          payload = row.payload ? JSON.parse(row.payload) : null
+        } catch {
+          payload = null
+        }
+        events.push({
+          id: Number(row.id),
+          taskId: String(row.task_id),
+          runId: row.run_id === null ? null : Number(row.run_id),
+          kind: String(row.kind),
+          payload,
+          createdAt: epochMilliseconds(row.created_at),
+        })
+      }
+      return { cursor: nextCursor, events }
+    } finally {
+      db.close()
+    }
+  }
+
+  async function actorEventCursor() {
+    const db = new DatabaseSync(databasePath(env), { readOnly: true })
+    try {
+      return Number(db.prepare('SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events').get().cursor)
+    } finally {
+      db.close()
+    }
+  }
+
   function openThread(ref) {
     if (!validSessionId(ref?.sessionId)) return { ok: false, error: 'No managing Hermes session is available' }
     return { ok: true, url: `hermes://open/${encodeURIComponent(ref.sessionId)}` }
@@ -274,6 +426,9 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
     detect,
     scanProjects,
     scanThreads,
+    scanActors,
+    scanActorEvents,
+    actorEventCursor,
     openThread,
     newSession: () => ({ ok: false, error: 'Hermes Kanban cannot start conversations from Bot Crossing' }),
     setArchived,

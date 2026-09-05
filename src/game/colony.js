@@ -18,6 +18,7 @@ import { Astronauts } from '../agents/astronauts.js'
 import { Indicators, BADGE } from '../agents/indicators.js'
 import { Particles } from '../agents/particles.js'
 import { Navigation } from '../agents/navigation.js'
+import { actorPresentation } from './actor-lifecycle.js'
 
 /**
  * The colony: everything that turns a list of agent threads into a place.
@@ -50,6 +51,9 @@ export const STATUS_ORDER = ['blocked', 'waiting', 'working', 'celebrating', 'id
 
 export const STATUS_LABEL = {
   working: 'Working',
+  reviewing: 'Reviewing',
+  'internal-wait': 'Waiting internally',
+  'requires-morgan': 'Jynx needs Morgan',
   waiting: 'Waiting on you',
   blocked: 'Blocked',
   celebrating: 'Shipped',
@@ -75,12 +79,35 @@ export function wantsMorganAttention(thread, status) {
   return status === 'waiting' || status === 'blocked'
 }
 
+/** Join temporary current-run actors onto durable task buildings without inventing actors. */
+export function actorRosterEntries(actors, threads, sites) {
+  const threadByTask = new Map()
+  for (const thread of threads.values()) {
+    if (thread.ref?.taskId) threadByTask.set(thread.ref.taskId, thread)
+  }
+  const roster = []
+  const seen = new Set()
+  for (const actor of actors || []) {
+    if (!actor?.id || seen.has(actor.id)) continue
+    const thread = threadByTask.get(actor.taskId)
+    const location = thread && sites.get(thread.id)
+    if (!thread || !location) continue
+    const presentation = actorPresentation(actor)
+    roster.push({ id: actor.id, thread, actor, ...presentation, ...location })
+    seen.add(actor.id)
+  }
+  return roster.sort((a, b) => a.id.localeCompare(b.id))
+}
+
 /**
  * Which behaviours earn a badge. Dormant and idle deliberately get none: their pose and
  * face already say it, and with most of a real thread list sitting quiet, a badge over
  * every one of them buries the single `?` that actually wants you.
  */
 const BADGE_FOR = {
+  'requires-morgan': BADGE.waiting,
+  'internal-wait': BADGE.none,
+  reviewing: BADGE.none,
   waiting: BADGE.waiting,
   blocked: BADGE.blocked,
   working: BADGE.working,
@@ -309,7 +336,7 @@ export class Colony {
    * ids — repo name for plots, session id for buildings — so a poll that changes nothing
    * moves nothing on screen.
    */
-  setThreads(threads, archivedIds = new Set(), catalog = []) {
+  setThreads(threads, archivedIds = new Set(), catalog = [], actors = null) {
     const now = Date.now()
     // Known products remain even when quiet; unmatched active threads retain fallback zones.
     const projects = projectGroups(threads, catalog, archivedIds).sort((a, b) => {
@@ -321,6 +348,7 @@ export class Colony {
     this._syncPlots(projects)
 
     const roster = []
+    const actorSites = new Map()
     const seenBuildings = new Set()
     const stats = { agents: 0, projects: projects.length }
     for (const key of STATUS_ORDER) stats[key] = 0
@@ -348,15 +376,17 @@ export class Colony {
         const building = this._syncBuilding(thread, plot, i)
         seenBuildings.add(thread.id)
 
-        roster.push({
-          id: thread.id,
-          thread,
-          status,
+        const location = {
           site: this._workSite(plot, building, i),
           // Where the work actually is. A working astronaut circles it rather than standing
           // at one spot, so it needs the building, not just a place to stand near it.
           anchor: building.mesh.position.clone(),
-        })
+        }
+        actorSites.set(thread.id, location)
+        // Other harnesses retain the Level 1/2 one-thread/one-astronaut projection.
+        if (actors === null || thread.source !== 'native-kanban') {
+          roster.push({ id: thread.id, thread, status, role: 'worker', stewardSignal: false, ...location })
+        }
       })
     }
 
@@ -367,9 +397,11 @@ export class Colony {
     }
 
     this.threads = new Map(live.map((t) => [t.id, t]))
+    if (actors !== null) roster.push(...actorRosterEntries(actors, this.threads, actorSites))
     this.urgentPlots = urgent
     this.activePlots = active
     this._rebuildNavigation()
+    stats.agents = roster.length
     this.stats = { ...stats, done: stats.celebrating }
     this.astronauts.setRoster(roster, this._world())
     return this.stats
@@ -484,6 +516,7 @@ export class Colony {
       mesh.rotation.y = ((hashString(thread.id) >>> 8) % 360) * (Math.PI / 180)
       // New buildings rise from nothing rather than appearing whole.
       mesh.userData.setProgress(0)
+      mesh.userData.threadId = thread.id
       this.worldGroup.add(mesh)
       entry = { mesh, plot: plot.id, slot: index, progress: 0, target, retiring: false }
       this.buildings.set(thread.id, entry)
@@ -854,8 +887,43 @@ export class Colony {
     return this.astronauts.pick(this.camera, ndcX, ndcY, aspect)
   }
 
+  pickBuilding(ndcX, ndcY) {
+    const raycaster = this._buildingRaycaster || (this._buildingRaycaster = new THREE.Raycaster())
+    raycaster.setFromCamera({ x: ndcX, y: ndcY }, this.camera)
+    const meshes = [...this.buildings.values()].filter((entry) => !entry.retiring).map((entry) => entry.mesh)
+    const hit = raycaster.intersectObjects(meshes, false)[0]
+    return hit ? this.buildingTargetFor(hit.object.userData.threadId) : null
+  }
+
   agentFor(id) {
     return this.astronauts.byId.get(id)
+  }
+
+  buildingTargetFor(id) {
+    const entry = this.buildings.get(id)
+    const thread = this.threads.get(id)
+    if (!entry || entry.retiring || !thread) return null
+    let target = entry.targetObject
+    if (!target) {
+      target = entry.targetObject = {
+        id,
+        kind: 'task',
+        thread,
+        pos: entry.mesh.position,
+        trim: new THREE.Color(entry.accent),
+        eye: new THREE.Color(1, 1, 1),
+        faceFrame: 0,
+        state: 'at-site',
+      }
+    }
+    target.thread = thread
+    target.status = statusFor(thread)
+    target.trim.set(entry.accent)
+    return target
+  }
+
+  targetFor(id) {
+    return this.agentFor(id) || this.buildingTargetFor(id)
   }
 
   setUiVisible(visible) {

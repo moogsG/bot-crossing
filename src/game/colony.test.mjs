@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { createServer } from 'vite'
 
 const vite = await createServer({ server: { middlewareMode: true, hmr: false }, appType: 'custom' })
-const { projectGroups, wantsMorganAttention } = await vite.ssrLoadModule('/src/game/colony.js')
+const { actorRosterEntries, projectGroups, wantsMorganAttention } = await vite.ssrLoadModule('/src/game/colony.js')
 await vite.close()
 
 test('known projects persist without agents and matching tasks share their stable zone', () => {
@@ -185,4 +185,35 @@ test('only explicit Hermes attention makes a task Morgan-facing while legacy wai
     attentionClasses.map(([label, thread, status]) => [label, wantsMorganAttention(thread, status)]),
     attentionClasses.map(([label, , , expected]) => [label, expected])
   )
+})
+
+test('task buildings and temporary run actors keep separate stable identities', () => {
+  const threads = new Map([
+    ['hermes-kanban:t_live', { id: 'hermes-kanban:t_live', ref: { taskId: 't_live' } }],
+    ['hermes-kanban:t_done', { id: 'hermes-kanban:t_done', ref: { taskId: 't_done' } }],
+  ])
+  const sites = new Map([
+    ['hermes-kanban:t_live', { site: 'site-live', anchor: 'anchor-live' }],
+    ['hermes-kanban:t_done', { site: 'site-done', anchor: 'anchor-done' }],
+  ])
+  const actor = {
+    id: 'hermes-kanban:actor:t_live:7',
+    taskId: 't_live',
+    profile: 'reviewer',
+    lifecycleState: 'reviewing',
+    requiresMorgan: false,
+  }
+
+  assert.deepEqual(actorRosterEntries([actor], threads, sites), [
+    {
+      id: 'hermes-kanban:actor:t_live:7',
+      thread: threads.get('hermes-kanban:t_live'),
+      actor,
+      status: 'reviewing',
+      role: 'reviewer',
+      stewardSignal: false,
+      site: 'site-live',
+      anchor: 'anchor-live',
+    },
+  ])
 })

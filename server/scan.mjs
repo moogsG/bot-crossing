@@ -104,6 +104,44 @@ export async function scanProjects() {
   return scanProjectCatalogFrom(await detectedHarnesses())
 }
 
+/** Current task-linked run actors, isolated and deduplicated by their stable actor id. */
+export async function scanActorSnapshotsFrom(harnesses, warn = (message) => console.warn(message)) {
+  const lists = await Promise.all(
+    harnesses.map(async (harness) => {
+      if (!harness.scanActors) return []
+      try {
+        return (await harness.scanActors()).map((actor) => ({ ...actor, harness: harness.id }))
+      } catch (err) {
+        warn(`bot-crossing: harness "${harness.id}" failed to scan actors — ${err?.message || err}`)
+        return []
+      }
+    })
+  )
+  const actorsById = new Map()
+  for (const actor of lists.flat()) {
+    if (!actor?.id || actorsById.has(actor.id)) continue
+    actorsById.set(actor.id, actor)
+  }
+  return [...actorsById.values()].sort((a, b) => a.id.localeCompare(b.id))
+}
+
+export async function scanActors() {
+  return scanActorSnapshotsFrom(await detectedHarnesses())
+}
+
+/** Native event ids are board-local, so exactly one detected harness owns this cursor. */
+export async function scanActorEvents(since) {
+  const harnesses = await detectedHarnesses()
+  const harness = harnesses.find((entry) => entry.scanActorEvents)
+  return harness ? harness.scanActorEvents(since) : { cursor: Math.max(0, Number(since) || 0), events: [] }
+}
+
+export async function actorEventCursor() {
+  const harnesses = await detectedHarnesses()
+  const harness = harnesses.find((entry) => entry.actorEventCursor)
+  return harness ? harness.actorEventCursor() : 0
+}
+
 /** What the HUD shows in the harness list: who is installed, and what they can do. */
 export async function harnessStatus() {
   const detected = new Set((await detectedHarnesses()).map((h) => h.id))

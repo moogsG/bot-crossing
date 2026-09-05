@@ -17,6 +17,17 @@ import { loadKit } from './world/kit.js'
 import { crewRig, loadCrew } from './agents/crew.js'
 import { TIMES } from './world/sky.js'
 import {
+  actorOpenTarget,
+  createActorState,
+  reconcileActorUpdate,
+  reconcileActorSnapshot,
+  reduceActorBatch,
+  visibleActors,
+} from './game/actor-lifecycle.js'
+import {
+  fetchActorEventBacklog,
+  fetchActorEvents,
+  fetchActors,
   fetchThreads,
   fetchProjects,
   fetchState,
@@ -36,7 +47,8 @@ import {
  * can never silently drop an archive. Everything else is wiring.
  */
 
-const POLL_MS = 15000
+const POLL_MS = 30000
+const EVENT_POLL_MS = 600
 const app = document.getElementById('app')
 
 app.insertAdjacentHTML(
@@ -58,6 +70,7 @@ const colony = new Colony(engine.scene, settings, engine.camera, engine.renderer
 let state = { archived: [], archivedAt: {}, opened: [], plots: {}, seen: {} }
 let threads = []
 let projects = []
+let actorState = createActorState()
 /** Last legend built for the bottom bar, kept so the open zone's chip can light up between polls. */
 let legendProjects = []
 /** The zone layout as last written to the colony file, so an unchanged map is not re-saved. */
@@ -190,11 +203,14 @@ const actions = {
   },
 
   openThread: async () => {
-    const thread = threads.find((t) => t.id === selectedId)
-    if (!thread) return
+    const agent = colony.agentFor(selectedId)
+    const actorTarget = actorOpenTarget(agent?.actor)
+    const thread = agent?.thread || threads.find((t) => t.id === selectedId)
+    const target = actorTarget || thread
+    if (!target || (agent?.actor && !actorTarget)) return
     try {
-      await openThread(thread)
-      colony.astronauts.celebrate(thread.id)
+      await openThread(target)
+      if (agent) colony.astronauts.celebrate(agent.id)
       hud.toast(`Opened in ${thread.harnessName || 'your harness'}`)
       // Opening is the thing that makes a thread no longer unread, so refresh shortly after.
       setTimeout(poll, 1800)
@@ -204,7 +220,7 @@ const actions = {
   },
 
   archiveThread: async () => {
-    const thread = threads.find((t) => t.id === selectedId)
+    const thread = colony.targetFor(selectedId)?.thread || threads.find((t) => t.id === selectedId)
     if (!thread) return
     try {
       const res = await archiveThread(thread, true)
@@ -244,22 +260,22 @@ window.addEventListener('resize', () => hud.setSideWidth(sideWidth()))
 
 function select(id, { fly = false } = {}) {
   selectedId = id
-  const agent = id ? colony.agentFor(id) : null
-  if (!agent) {
+  const target = id ? colony.targetFor(id) : null
+  if (!target) {
     selectedId = null
     colony.astronauts.setSelected(null)
     hud.setSelection(null, null)
     syncProject()
     return
   }
-  colony.astronauts.setSelected(agent)
-  const thread = colony.threads.get(id) || agent.thread
-  hud.setSelection(agent, thread)
+  colony.astronauts.setSelected(target.kind === 'task' ? null : target)
+  const thread = target.thread
+  hud.setSelection(target, thread)
   // Picking somebody is also picking the zone they are standing on: the sidebar follows.
   if (thread?.project && colony.plots.has(thread.project)) selectedProject = thread.project
   syncProject()
   if (fly) {
-    rig.focus(new THREE.Vector3(agent.pos.x, 0, agent.pos.z), { distance: Math.min(rig.desiredDistance, 26) })
+    rig.focus(new THREE.Vector3(target.pos.x, 0, target.pos.z), { distance: Math.min(rig.desiredDistance, 26) })
   }
 }
 
@@ -362,7 +378,7 @@ function syncProject() {
     accent: plot.accent,
     path: pathForProject(plot.id) || plot.projectPath || '',
     threads: list,
-    selectedId,
+    selectedId: colony.targetFor(selectedId)?.thread?.id || selectedId,
   })
   // The legend is the same selection seen from the bottom of the screen: keep it in step
   // here rather than only on the next poll.
@@ -407,9 +423,10 @@ engine.canvas.addEventListener('pointermove', (e) => {
   hoverId = agent?.id ?? null
   colony.astronauts.setHover(agent)
   // Pointing at a quiet plot is what makes its name appear.
-  const plot = plotUnder(e, p)
+  const building = agent ? null : colony.pickBuilding(p.x, p.y)
+  const plot = building ? null : plotUnder(e, p)
   colony.setHoveredPlot(plot)
-  engine.canvas.style.cursor = agent || plot ? 'pointer' : 'grab'
+  engine.canvas.style.cursor = agent || building || plot ? 'pointer' : 'grab'
 })
 
 /**
@@ -436,6 +453,11 @@ engine.canvas.addEventListener('pointerup', (e) => {
   const agent = colony.pick(p.x, p.y, p.aspect)
   if (agent) {
     select(agent.id, {})
+    return
+  }
+  const building = colony.pickBuilding(p.x, p.y)
+  if (building) {
+    select(building.id, {})
     return
   }
   // Nobody there: a zone's deck or its name plate opens that repo's sidebar instead, and
@@ -553,10 +575,19 @@ window.addEventListener('keydown', (e) => {
 
 // ── data ──────────────────────────────────────────────────────────────────────────────
 
-function applyThreads(list) {
+function applyThreads(list, actorResult = null, actorEvents = null) {
   threads = list
+  if (actorResult) {
+    const options = {
+      taskIds: new Set(list.map((thread) => thread.ref?.taskId).filter(Boolean)),
+      now: Date.now(),
+    }
+    actorState = actorEvents
+      ? reconcileActorUpdate(actorState, actorResult, actorEvents, options)
+      : reconcileActorSnapshot(actorState, actorResult.actors || [], { ...options, cursor: actorResult.cursor })
+  }
   const archivedSet = new Set(state.archived)
-  const stats = colony.setThreads(list, archivedSet, projects)
+  const stats = colony.setThreads(list, archivedSet, projects, visibleActors(actorState))
   hud.setStats(stats)
 
   legendProjects = colony.plotOrder
@@ -571,8 +602,8 @@ function applyThreads(list) {
 
   // Keep the card honest if the thread it is showing changed underneath it.
   if (selectedId) {
-    const still = colony.agentFor(selectedId)
-    if (still) hud.setSelection(still, colony.threads.get(selectedId) || still.thread)
+    const still = colony.targetFor(selectedId)
+    if (still) hud.setSelection(still, still.thread)
     else select(null, {})
   }
   // Which also repaints the legend, so the open zone's chip is lit by the same pass.
@@ -594,18 +625,44 @@ async function poll() {
   if (polling) return
   polling = true
   try {
-    const [res, projectResult] = await Promise.all([
+    const [res, actorResult, projectResult] = await Promise.all([
       fetchThreads(),
+      fetchActors(),
       fetchProjects().catch(() => ({ projects })),
     ])
+    const actorEvents = await fetchActorEventBacklog(actorResult.cursor, actorResult.through)
     projects = projectResult.projects || []
-    applyThreads(res.threads || [])
+    applyThreads(res.threads || [], actorResult, actorEvents)
     hud.removeBoot()
   } catch (err) {
     hud.toast(err.message || 'Could not reach the thread scanner', 'err')
     hud.removeBoot()
   } finally {
     polling = false
+  }
+}
+
+let eventTimer = 0
+let eventFailures = 0
+async function pollEvents() {
+  clearTimeout(eventTimer)
+  try {
+    const batch = await fetchActorEvents(actorState.cursor)
+    actorState = reduceActorBatch(actorState, batch.events || [], { now: Date.now() })
+    if (Number(batch.cursor) < actorState.cursor) actorState.needsReconcile = true
+    else actorState.cursor = Math.max(actorState.cursor, Number(batch.cursor) || 0)
+    eventFailures = 0
+    if (batch.events?.length || actorState.celebrations.size) applyThreads(threads)
+    if (actorState.needsReconcile || batch.events?.length) await poll()
+  } catch {
+    eventFailures++
+    if (eventFailures === 1) {
+      hud.hint('Live updates reconnecting — recovery refresh remains active', 5200)
+      await poll()
+    }
+  } finally {
+    const delay = eventFailures ? Math.min(30000, EVENT_POLL_MS * 2 ** Math.min(eventFailures, 6)) : EVENT_POLL_MS
+    eventTimer = setTimeout(pollEvents, delay)
   }
 }
 
@@ -650,6 +707,7 @@ async function boot() {
   if (!kitError) colony.onAssetsReady()
 
   await poll()
+  pollEvents()
   setInterval(poll, POLL_MS)
   window.addEventListener('focus', poll)
   // A tab that was hidden for an hour should catch up the moment it comes back.
@@ -691,9 +749,9 @@ engine.add({
     if (selectedId) {
       hud.updateAvatar(colony.astronauts.faceTexture.image)
       // A selected astronaut that walked off the roster should not keep a stale card open.
-      const agent = colony.agentFor(selectedId)
-      if (!agent) select(null, {})
-      else hud.placeCard(screenOf(agent))
+      const target = colony.targetFor(selectedId)
+      if (!target) select(null, {})
+      else hud.placeCard(screenOf(target))
     }
     hud.setFps(engine.perf, engine.viewport, `${colony.astronauts.visibleCount} crew · ${colony.particles.liveCount} bits`)
   },
