@@ -168,10 +168,21 @@ export function repositoryLandmarkFor(project, activeCards = project?.threads?.l
   }
 }
 
-/** Merge persistent known products with task-derived fallback zones, without fake agents. */
-export function projectGroups(threads, catalog = [], archivedIds = new Set()) {
+/** Recover repository presentation from a saved plot id without turning it into a task. */
+const savedProjectFor = (value) => {
+  const id = String(value || '')
+  let path = ''
+  if (id.startsWith('git:')) path = id.slice(4).replace(/\/\.git$/, '')
+  else if (id.startsWith('workspace:')) path = id.slice('workspace:'.length)
+  const name = normalizedPath(path).split('/').at(-1) || id
+  return id ? { id, name, path, threads: [] } : null
+}
+
+/** Merge persistent known products and saved plots with task-derived zones, without fake agents. */
+export function projectGroups(threads, catalog = [], archivedIds = new Set(), savedPlots = new Map()) {
+  const knownProjects = Array.isArray(catalog) ? catalog : []
   const groups = new Map()
-  for (const project of catalog) {
+  for (const project of knownProjects) {
     if (!project?.slug) continue
     groups.set(project.slug, {
       id: project.slug,
@@ -181,12 +192,23 @@ export function projectGroups(threads, catalog = [], archivedIds = new Set()) {
     })
   }
 
+  // The project endpoint can be unavailable or legitimately empty. In that case the saved
+  // plot keys are the durable repository registry we already have locally: restore quiet
+  // landmarks from those identities, but never invent task cards or actors from layout data.
+  if (knownProjects.length === 0) {
+    const savedIds = savedPlots instanceof Map ? savedPlots.keys() : Object.keys(savedPlots || {})
+    for (const savedId of savedIds) {
+      const project = savedProjectFor(savedId)
+      if (project) groups.set(project.id, project)
+    }
+  }
+
   for (const thread of threads) {
     if (thread.archived || archivedIds.has(thread.id)) continue
     const workspace = normalizedPath(thread.projectPath || thread.cwd)
     const repository = normalizedPath(thread.repositoryPath)
     const canonicalGitRepository = String(thread.repositoryId || '').startsWith('git:')
-    const known = catalog.find((project) => {
+    const known = knownProjects.find((project) => {
       const root = normalizedPath(project.path)
       if (canonicalGitRepository) return repository && root === repository
       return (
@@ -370,7 +392,7 @@ export class Colony {
     const now = Date.now()
     const visible = visibleTaskCards(threads, now)
     // Known products remain even when quiet; unmatched active threads retain fallback zones.
-    const projects = projectGroups(visible, catalog, archivedIds).sort((a, b) => {
+    const projects = projectGroups(visible, catalog, archivedIds, this.plotCells).sort((a, b) => {
       if (b.threads.length !== a.threads.length) return b.threads.length - a.threads.length
       return a.id.localeCompare(b.id)
     })

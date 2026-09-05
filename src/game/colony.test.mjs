@@ -231,6 +231,41 @@ test('historical and malformed native completions leave no worksite, fallback zo
   ])
 })
 
+test('saved repository plots remain quiet landmarks when the catalog is empty without restoring task history', () => {
+  const now = 30_000
+  const repositoryId = 'git:/work/bot-crossing/.git'
+  const savedPlots = new Map([
+    [repositoryId, [{ q: 0, r: 0 }]],
+    ['workspace:/work/perch-review', [{ q: -1, r: 1 }]],
+  ])
+  const completedHistory = {
+    id: 'hermes-kanban:t_history',
+    project: 'bot-crossing',
+    repositoryId,
+    repositoryPath: '/work/bot-crossing',
+    source: 'native-kanban',
+    completedAt: now - COMPLETION_GRACE_MS,
+    ref: { status: 'done', taskId: 't_history' },
+  }
+
+  const visible = visibleTaskCards([completedHistory], now)
+  const groups = projectGroups(visible, [], new Set(), savedPlots)
+
+  assert.deepEqual(visible, [])
+  assert.deepEqual(
+    groups.map(({ id, name, path, threads }) => ({ id, name, path, threadIds: threads.map((thread) => thread.id) })),
+    [
+      { id: repositoryId, name: 'bot-crossing', path: '/work/bot-crossing', threadIds: [] },
+      {
+        id: 'workspace:/work/perch-review',
+        name: 'perch-review',
+        path: '/work/perch-review',
+        threadIds: [],
+      },
+    ]
+  )
+})
+
 test('only explicit Hermes attention makes a task Morgan-facing while legacy waits stay compatible', () => {
   const attentionClasses = [
     ['needs_input', { source: 'native-kanban', requiresMorgan: true }, 'blocked', true],
