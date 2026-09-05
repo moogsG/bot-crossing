@@ -157,6 +157,7 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
             t.assignee,
             t.created_at,
             t.started_at,
+            t.completed_at,
             t.workspace_kind,
             t.project_id,
             t.tenant,
@@ -219,6 +220,7 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
             model: 'Jynx',
             effort: '',
             createdAt: epochMilliseconds(task.created_at),
+            completedAt: epochMilliseconds(task.completed_at),
             lastActivityAt: Math.max(
               heartbeat,
               epochMilliseconds(task.run_started_at),

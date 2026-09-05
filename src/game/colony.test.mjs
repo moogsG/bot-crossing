@@ -3,7 +3,14 @@ import { test } from 'node:test'
 import { createServer } from 'vite'
 
 const vite = await createServer({ server: { middlewareMode: true, hmr: false }, appType: 'custom' })
-const { actorRosterEntries, projectGroups, wantsMorganAttention } = await vite.ssrLoadModule('/src/game/colony.js')
+const {
+  actorRosterEntries,
+  projectGroups,
+  repositoryLandmarkFor,
+  visibleTaskCards,
+  wantsMorganAttention,
+} = await vite.ssrLoadModule('/src/game/colony.js')
+const { COMPLETION_GRACE_MS } = await vite.ssrLoadModule('/src/game/actor-lifecycle.js')
 await vite.close()
 
 test('known projects persist without agents and matching tasks share their stable zone', () => {
@@ -167,6 +174,61 @@ test('archived tasks do not create agents or fallback zones', () => {
   )
 
   assert.deepEqual(groups, [{ id: 'perch', name: 'Perch', path: '/work/perch', threads: [] }])
+})
+
+test('repository landmarks keep stable identity and capped S, M, and L silhouettes', () => {
+  const project = { id: 'bot-crossing', name: 'Bot Crossing' }
+
+  assert.deepEqual(repositoryLandmarkFor(project, 0), {
+    id: 'repository:bot-crossing',
+    kind: 'habitat',
+    project,
+  })
+  assert.equal(repositoryLandmarkFor(project, 1).kind, 'habitat')
+  assert.equal(repositoryLandmarkFor(project, 2).kind, 'workshop')
+  assert.equal(repositoryLandmarkFor(project, 4).kind, 'workshop')
+  assert.equal(repositoryLandmarkFor(project, 5).kind, 'tower')
+  assert.equal(repositoryLandmarkFor(project, 50).kind, 'tower')
+})
+
+test('native completed worksites remain for exactly the shared grace interval', () => {
+  const completedAt = 10_000
+  const completed = {
+    id: 'hermes-kanban:t_recent',
+    source: 'native-kanban',
+    completedAt,
+    ref: { status: 'done', taskId: 't_recent' },
+  }
+
+  assert.equal(COMPLETION_GRACE_MS, 2000)
+  assert.deepEqual(visibleTaskCards([completed], completedAt + COMPLETION_GRACE_MS - 1), [completed])
+  assert.deepEqual(visibleTaskCards([completed], completedAt + COMPLETION_GRACE_MS), [])
+})
+
+test('historical and malformed native completions leave no worksite, fallback zone, or panel card', () => {
+  const now = 20_000
+  const active = {
+    id: 'hermes-kanban:t_active',
+    project: 'known',
+    source: 'native-kanban',
+    ref: { status: 'running', taskId: 't_active' },
+  }
+  const legacy = { id: 'legacy-complete', project: 'legacy', source: 'desktop', prState: 'MERGED' }
+  const rejected = [
+    { id: 'old', project: 'old', completedAt: now - COMPLETION_GRACE_MS, ref: { status: 'done' } },
+    { id: 'missing', project: 'missing', completedAt: 0, ref: { status: 'done' } },
+    { id: 'text', project: 'text', completedAt: 'recent', ref: { status: 'done' } },
+    { id: 'future', project: 'future', completedAt: now + 1, ref: { status: 'done' } },
+  ].map((thread) => ({ ...thread, source: 'native-kanban' }))
+
+  const visible = visibleTaskCards([active, legacy, ...rejected], now)
+  const groups = projectGroups(visible, [{ id: 'p_known', slug: 'known', name: 'Known', path: '/work/known' }])
+
+  assert.deepEqual(visible, [active, legacy])
+  assert.deepEqual(groups.map(({ id, threads }) => [id, threads.map((thread) => thread.id)]), [
+    ['known', ['hermes-kanban:t_active']],
+    ['legacy', ['legacy-complete']],
+  ])
 })
 
 test('only explicit Hermes attention makes a task Morgan-facing while legacy waits stay compatible', () => {

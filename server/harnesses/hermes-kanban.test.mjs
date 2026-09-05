@@ -214,7 +214,7 @@ test('reads active projects from the profile-scoped HERMES_HOME without mutating
   assert.deepEqual(await fsp.readFile(path.join(profileHome, 'projects.db')), before)
 })
 
-test('keeps every non-archived native-board task as a durable building record', async () => {
+test('projects every non-archived native-board task for colony lifecycle filtering', async () => {
   const { home, databasePath } = await fixtureHome()
   process.env.HERMES_HOME = home
   for (const status of ['ready', 'running', 'review', 'blocked', 'todo', 'done', 'triage', 'archived']) {
@@ -454,6 +454,37 @@ test('maps task details and heartbeat without consulting run end time', async ()
     lastHeartbeatAt: 150000,
   })
   assert.equal(JSON.stringify(thread).includes('999999'), false)
+})
+
+test('projects completion time while preserving repository, worktree, and lifecycle metadata', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  insertTask(databasePath, {
+    id: 't_completed_projection',
+    status: 'done',
+    completed_at: 321,
+    workspace_kind: 'worktree',
+    workspace_path: '/work/repo/.worktrees/t_completed_projection',
+    branch_name: 'repo/t_completed_projection',
+    project_id: 'p_repo',
+    current_run_id: 8,
+  })
+  insertRun(databasePath, {
+    id: 8,
+    task_id: 't_completed_projection',
+    profile: 'builder',
+    status: 'done',
+    started_at: 300,
+  })
+
+  const [thread] = await hermesKanban.scanThreads()
+
+  assert.equal(thread.completedAt, 321000)
+  assert.equal(thread.worktree, 't_completed_projection')
+  assert.equal(thread.gitBranch, 'repo/t_completed_projection')
+  assert.equal(thread.projectId, 'p_repo')
+  assert.equal(thread.ref.status, 'done')
+  assert.equal(thread.ref.worker.runStatus, 'done')
 })
 
 test('normalizes an active review claim into one stable task-linked reviewing actor', async () => {
