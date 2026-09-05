@@ -214,6 +214,49 @@ test('reads active projects from the profile-scoped HERMES_HOME without mutating
   assert.deepEqual(await fsp.readFile(path.join(profileHome, 'projects.db')), before)
 })
 
+test('aggregates every Hermes project registry independently with canonical repository deduplication', async () => {
+  const { home } = await fixtureHome()
+  const builderHome = path.join(home, 'profiles', 'builder')
+  const jynxHome = path.join(home, 'profiles', 'jynx')
+  const brokenHome = path.join(home, 'profiles', 'broken')
+  const sharedRepository = path.join(home, 'repositories', 'shared')
+  await Promise.all([
+    fsp.mkdir(builderHome, { recursive: true }),
+    fsp.mkdir(jynxHome, { recursive: true }),
+    fsp.mkdir(brokenHome, { recursive: true }),
+    fsp.mkdir(sharedRepository, { recursive: true }),
+  ])
+  createProjectsDatabase(home, [
+    { id: 'p_root', slug: 'z-root', name: 'Root project', primary_path: '/work/root' },
+    { id: 'p_archived', slug: 'archived', name: 'Archived', primary_path: '/work/archived', archived: 1 },
+  ])
+  createProjectsDatabase(builderHome, [
+    { id: 'p_shared_builder', slug: 'shared-builder', name: 'Shared builder copy', primary_path: sharedRepository },
+    { id: 'p_pathless', slug: 'pathless', name: 'Pathless project' },
+  ])
+  createProjectsDatabase(jynxHome, [
+    { id: 'p_alpha', slug: 'alpha', name: 'Alpha project', primary_path: '/work/alpha/' },
+    { id: 'p_shared_jynx', slug: 'shared-jynx', name: 'Shared Jynx copy', primary_path: `${sharedRepository}/.` },
+  ])
+  await fsp.writeFile(path.join(brokenHome, 'projects.db'), 'not a sqlite database')
+  process.env.HERMES_HOME = builderHome
+
+  const projects = await hermesKanban.scanProjects()
+  const canonicalSharedRepository = await fsp.realpath(sharedRepository)
+
+  assert.deepEqual(projects, [
+    { id: 'p_alpha', slug: 'alpha', name: 'Alpha project', path: '/work/alpha' },
+    { id: 'p_pathless', slug: 'pathless', name: 'Pathless project', path: '' },
+    {
+      id: 'p_shared_builder',
+      slug: 'shared-builder',
+      name: 'Shared builder copy',
+      path: canonicalSharedRepository,
+    },
+    { id: 'p_root', slug: 'z-root', name: 'Root project', path: '/work/root' },
+  ])
+})
+
 test('projects every non-archived native-board task for colony lifecycle filtering', async () => {
   const { home, databasePath } = await fixtureHome()
   process.env.HERMES_HOME = home

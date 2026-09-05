@@ -32,10 +32,6 @@ function databasePath(env) {
   return path.join(sharedHermesHome(env), 'kanban', 'boards', 'native', 'kanban.db')
 }
 
-function projectsPath(env) {
-  return path.join(configuredHome(env), 'projects.db')
-}
-
 const epochMilliseconds = (seconds) => (Number(seconds) || 0) * 1000
 
 function attentionFor(status, blockKind) {
@@ -75,6 +71,47 @@ function actorHeartbeat(lastAt, now) {
 }
 
 const normalizedPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
+
+async function projectDatabasePaths(env) {
+  const home = sharedHermesHome(env)
+  let profiles = []
+  try {
+    profiles = (await fsp.readdir(path.join(home, 'profiles'), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+  } catch {
+    // A shared home without profiles still has a valid root project registry.
+  }
+  return [path.join(home, 'projects.db'), ...profiles.map((profile) => path.join(home, 'profiles', profile, 'projects.db'))]
+}
+
+function projectsFrom(databaseFile) {
+  let db
+  try {
+    db = new DatabaseSync(databaseFile, { readOnly: true })
+    return db
+      .prepare(`
+        SELECT id, slug, name, primary_path
+        FROM projects
+        WHERE archived = 0
+      `)
+      .all()
+  } catch {
+    return []
+  } finally {
+    db?.close()
+  }
+}
+
+async function canonicalProjectPath(value) {
+  if (!value) return ''
+  try {
+    return normalizedPath(await fsp.realpath(String(value)))
+  } catch {
+    return normalizedPath(path.resolve(String(value)))
+  }
+}
 
 async function repositoryFor(workspacePath, fallback, execFile) {
   if (!workspacePath) return { repositoryId: `metadata:${fallback || 'Other'}`, repositoryPath: '' }
@@ -121,25 +158,26 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
   }
 
   async function scanProjects() {
-    const db = new DatabaseSync(projectsPath(env), { readOnly: true })
-    try {
-      return db
-        .prepare(`
-          SELECT id, slug, name, primary_path
-          FROM projects
-          WHERE archived = 0
-          ORDER BY slug, id
-        `)
-        .all()
-        .map((project) => ({
-          id: String(project.id),
-          slug: String(project.slug),
-          name: String(project.name),
-          path: String(project.primary_path || ''),
-        }))
-    } finally {
-      db.close()
+    const stores = await projectDatabasePaths(env)
+    const projects = (
+      await Promise.all(
+        stores.flatMap((databaseFile) =>
+          projectsFrom(databaseFile).map(async (project) => ({
+            id: String(project.id),
+            slug: String(project.slug),
+            name: String(project.name),
+            path: await canonicalProjectPath(project.primary_path),
+          }))
+        )
+      )
+    ).sort((a, b) => a.slug.localeCompare(b.slug) || a.id.localeCompare(b.id) || a.path.localeCompare(b.path))
+
+    const repositories = new Map()
+    for (const project of projects) {
+      const identity = project.path ? `path:${project.path}` : `project:${project.id}`
+      if (!repositories.has(identity)) repositories.set(identity, project)
     }
+    return [...repositories.values()]
   }
 
   async function scanThreads() {
