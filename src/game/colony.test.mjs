@@ -3,7 +3,16 @@ import { test } from 'node:test'
 import { createServer } from 'vite'
 
 const vite = await createServer({ server: { middlewareMode: true, hmr: false }, appType: 'custom' })
-const { actorRosterEntries, projectGroups, wantsMorganAttention } = await vite.ssrLoadModule('/src/game/colony.js')
+const {
+  actorRosterEntries,
+  projectGroups,
+  repositoryLandmarkFor,
+  repositoryPlotDemand,
+  visibleTaskCards,
+  wantsMorganAttention,
+} = await vite.ssrLoadModule('/src/game/colony.js')
+const { COMPLETION_GRACE_MS } = await vite.ssrLoadModule('/src/game/actor-lifecycle.js')
+const { allocateCells, SLOTS_PER_CELL } = await vite.ssrLoadModule('/src/world/plots.js')
 await vite.close()
 
 test('known projects persist without agents and matching tasks share their stable zone', () => {
@@ -167,6 +176,124 @@ test('archived tasks do not create agents or fallback zones', () => {
   )
 
   assert.deepEqual(groups, [{ id: 'perch', name: 'Perch', path: '/work/perch', threads: [] }])
+})
+
+test('repository landmarks keep stable identity and capped S, M, and L silhouettes', () => {
+  const project = { id: 'bot-crossing', name: 'Bot Crossing' }
+
+  assert.deepEqual(repositoryLandmarkFor(project, 0), {
+    id: 'repository:bot-crossing',
+    kind: 'habitat',
+    project,
+  })
+  assert.equal(repositoryLandmarkFor(project, 1).kind, 'habitat')
+  assert.equal(repositoryLandmarkFor(project, 2).kind, 'workshop')
+  assert.equal(repositoryLandmarkFor(project, 4).kind, 'workshop')
+  assert.equal(repositoryLandmarkFor(project, 5).kind, 'tower')
+  assert.equal(repositoryLandmarkFor(project, 50).kind, 'tower')
+})
+
+test('native completed worksites remain for exactly the shared grace interval', () => {
+  const completedAt = 10_000
+  const completed = {
+    id: 'hermes-kanban:t_recent',
+    source: 'native-kanban',
+    completedAt,
+    ref: { status: 'done', taskId: 't_recent' },
+  }
+
+  assert.equal(COMPLETION_GRACE_MS, 2000)
+  assert.deepEqual(visibleTaskCards([completed], completedAt + COMPLETION_GRACE_MS - 1), [completed])
+  assert.deepEqual(visibleTaskCards([completed], completedAt + COMPLETION_GRACE_MS), [])
+})
+
+test('historical and malformed native completions leave no worksite, fallback zone, or panel card', () => {
+  const now = 20_000
+  const active = {
+    id: 'hermes-kanban:t_active',
+    project: 'known',
+    source: 'native-kanban',
+    ref: { status: 'running', taskId: 't_active' },
+  }
+  const legacy = { id: 'legacy-complete', project: 'legacy', source: 'desktop', prState: 'MERGED' }
+  const rejected = [
+    { id: 'old', project: 'old', completedAt: now - COMPLETION_GRACE_MS, ref: { status: 'done' } },
+    { id: 'missing', project: 'missing', completedAt: 0, ref: { status: 'done' } },
+    { id: 'text', project: 'text', completedAt: 'recent', ref: { status: 'done' } },
+    { id: 'future', project: 'future', completedAt: now + 1, ref: { status: 'done' } },
+  ].map((thread) => ({ ...thread, source: 'native-kanban' }))
+
+  const visible = visibleTaskCards([active, legacy, ...rejected], now)
+  const groups = projectGroups(visible, [{ id: 'p_known', slug: 'known', name: 'Known', path: '/work/known' }])
+
+  assert.deepEqual(visible, [active, legacy])
+  assert.deepEqual(groups.map(({ id, threads }) => [id, threads.map((thread) => thread.id)]), [
+    ['known', ['hermes-kanban:t_active']],
+    ['legacy', ['legacy-complete']],
+  ])
+})
+
+test('saved repository plots remain quiet landmarks when the catalog is empty without restoring task history', () => {
+  const now = 30_000
+  const repositoryId = 'git:/work/bot-crossing/.git'
+  const savedPlots = new Map([
+    [repositoryId, [{ q: 0, r: 0 }]],
+    ['workspace:/work/perch-review', [{ q: -1, r: 1 }]],
+  ])
+  const completedHistory = {
+    id: 'hermes-kanban:t_history',
+    project: 'bot-crossing',
+    repositoryId,
+    repositoryPath: '/work/bot-crossing',
+    source: 'native-kanban',
+    completedAt: now - COMPLETION_GRACE_MS,
+    ref: { status: 'done', taskId: 't_history' },
+  }
+
+  const visible = visibleTaskCards([completedHistory], now)
+  const groups = projectGroups(visible, [], new Set(), savedPlots)
+
+  assert.deepEqual(visible, [])
+  assert.deepEqual(
+    groups.map(({ id, name, path, threads }) => ({ id, name, path, threadIds: threads.map((thread) => thread.id) })),
+    [
+      { id: repositoryId, name: 'bot-crossing', path: '/work/bot-crossing', threadIds: [] },
+      {
+        id: 'workspace:/work/perch-review',
+        name: 'perch-review',
+        path: '/work/perch-review',
+        threadIds: [],
+      },
+    ]
+  )
+})
+
+test('repository territory grows for visible worksites, remembers capacity, and stays capped without restoring history', () => {
+  const oneCell = [{ q: 0, r: 0 }]
+  const threeCells = [oneCell[0], { q: 1, r: 0 }, { q: 0, r: 1 }]
+  const nineCells = Array.from({ length: 9 }, (_, q) => ({ q, r: 0 }))
+
+  assert.equal(SLOTS_PER_CELL, 7)
+  assert.equal(repositoryPlotDemand({ threads: [] }, []), 1)
+  assert.equal(repositoryPlotDemand({ threads: Array(6).fill({}) }, oneCell), SLOTS_PER_CELL)
+  assert.equal(repositoryPlotDemand({ threads: Array(7).fill({}) }, oneCell), SLOTS_PER_CELL + 1)
+  assert.equal(repositoryPlotDemand({ threads: [] }, threeCells), 3 * SLOTS_PER_CELL)
+
+  const capped = allocateCells(
+    [{ id: 'repository', size: repositoryPlotDemand({ threads: Array(100).fill({}) }, nineCells) }],
+    new Map([['repository', nineCells]])
+  )
+  assert.equal(capped.get('repository').length, 9)
+
+  const completed = {
+    id: 'hermes-kanban:t_history',
+    source: 'native-kanban',
+    completedAt: 10_000,
+    ref: { status: 'done', taskId: 't_history' },
+  }
+  const visible = visibleTaskCards([completed], 10_000 + COMPLETION_GRACE_MS)
+  assert.deepEqual(visible, [])
+  assert.equal(repositoryPlotDemand({ threads: visible }, threeCells), 3 * SLOTS_PER_CELL)
 })
 
 test('only explicit Hermes attention makes a task Morgan-facing while legacy waits stay compatible', () => {

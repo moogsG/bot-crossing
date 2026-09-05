@@ -11,6 +11,7 @@ import {
   DECK_TOP,
   PLOT_PALETTE,
   PLOT_CELL,
+  SLOTS_PER_CELL,
 } from '../world/plots.js'
 import { createBuilding, buildingUniforms, Scaffolds } from '../world/buildings.js'
 import { Ship } from '../world/ship.js'
@@ -18,7 +19,7 @@ import { Astronauts } from '../agents/astronauts.js'
 import { Indicators, BADGE } from '../agents/indicators.js'
 import { Particles } from '../agents/particles.js'
 import { Navigation } from '../agents/navigation.js'
-import { actorPresentation } from './actor-lifecycle.js'
+import { actorPresentation, COMPLETION_GRACE_MS } from './actor-lifecycle.js'
 
 /**
  * The colony: everything that turns a list of agent threads into a place.
@@ -34,9 +35,9 @@ import { actorPresentation } from './actor-lifecycle.js'
  *   long idle      → asleep on the job
  *   anything else  → pottering about its plot
  *
- * Threads group by repo, one repo per hex plot, and every thread gets a building seeded
- * from its own session id — so the colony's skyline is a stable, readable picture of what
- * you have running.
+ * Threads group by repo, one repo per hex plot. Each plot keeps one repository landmark,
+ * while visible cards get temporary worksites seeded from their own ids — so the colony's
+ * skyline is stable without turning completed task history into permanent architecture.
  */
 
 const STALE_MS = 3 * 24 * 60 * 60 * 1000
@@ -79,7 +80,7 @@ export function wantsMorganAttention(thread, status) {
   return status === 'waiting' || status === 'blocked'
 }
 
-/** Join temporary current-run actors onto durable task buildings without inventing actors. */
+/** Join temporary current-run actors onto temporary task worksites without inventing actors. */
 export function actorRosterEntries(actors, threads, sites) {
   const threadByTask = new Map()
   for (const thread of threads.values()) {
@@ -138,10 +139,61 @@ export function transcriptProgress(thread) {
 
 const normalizedPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
 
-/** Merge persistent known products with task-derived fallback zones, without fake agents. */
-export function projectGroups(threads, catalog = [], archivedIds = new Set()) {
+/** Native completed cards are transient: legacy harnesses keep their established lifecycle. */
+export function visibleTaskCards(threads, now = Date.now()) {
+  return threads.filter((thread) => {
+    if (thread?.source !== 'native-kanban') return true
+    const status = thread.ref?.status
+    if (status === 'archived') return false
+    if (status !== 'done') return true
+    const completedAt = thread.completedAt
+    return (
+      Number.isFinite(completedAt) &&
+      completedAt > 0 &&
+      completedAt <= now &&
+      now - completedAt < COMPLETION_GRACE_MS
+    )
+  })
+}
+
+/**
+ * One deterministic landmark per repository. Activity changes only its capped catalogue
+ * silhouette: S (0–1) is habitat, M (2–4) is workshop, and L (5+) is tower.
+ */
+export function repositoryLandmarkFor(project, activeCards = project?.threads?.length || 0) {
+  const count = Math.max(0, Number(activeCards) || 0)
+  return {
+    id: `repository:${project.id}`,
+    kind: count >= 5 ? 'tower' : count >= 2 ? 'workshop' : 'habitat',
+    project,
+  }
+}
+
+/**
+ * Territory grows when the landmark and visible worksites exhaust the established slots.
+ * Remembering whole-cell capacity makes that growth cumulative without persisting task data.
+ */
+export function repositoryPlotDemand(project, rememberedCells = []) {
+  const visibleDemand = Math.max(1, (project?.threads?.length || 0) + 1)
+  const rememberedCapacity = Array.isArray(rememberedCells) ? rememberedCells.length * SLOTS_PER_CELL : 0
+  return Math.max(visibleDemand, rememberedCapacity)
+}
+
+/** Recover repository presentation from a saved plot id without turning it into a task. */
+const savedProjectFor = (value) => {
+  const id = String(value || '')
+  let path = ''
+  if (id.startsWith('git:')) path = id.slice(4).replace(/\/\.git$/, '')
+  else if (id.startsWith('workspace:')) path = id.slice('workspace:'.length)
+  const name = normalizedPath(path).split('/').at(-1) || id
+  return id ? { id, name, path, threads: [] } : null
+}
+
+/** Merge persistent known products and saved plots with task-derived zones, without fake agents. */
+export function projectGroups(threads, catalog = [], archivedIds = new Set(), savedPlots = new Map()) {
+  const knownProjects = Array.isArray(catalog) ? catalog : []
   const groups = new Map()
-  for (const project of catalog) {
+  for (const project of knownProjects) {
     if (!project?.slug) continue
     groups.set(project.slug, {
       id: project.slug,
@@ -151,12 +203,23 @@ export function projectGroups(threads, catalog = [], archivedIds = new Set()) {
     })
   }
 
+  // The project endpoint can be unavailable or legitimately empty. In that case the saved
+  // plot keys are the durable repository registry we already have locally: restore quiet
+  // landmarks from those identities, but never invent task cards or actors from layout data.
+  if (knownProjects.length === 0) {
+    const savedIds = savedPlots instanceof Map ? savedPlots.keys() : Object.keys(savedPlots || {})
+    for (const savedId of savedIds) {
+      const project = savedProjectFor(savedId)
+      if (project) groups.set(project.id, project)
+    }
+  }
+
   for (const thread of threads) {
     if (thread.archived || archivedIds.has(thread.id)) continue
     const workspace = normalizedPath(thread.projectPath || thread.cwd)
     const repository = normalizedPath(thread.repositoryPath)
     const canonicalGitRepository = String(thread.repositoryId || '').startsWith('git:')
-    const known = catalog.find((project) => {
+    const known = knownProjects.find((project) => {
       const root = normalizedPath(project.path)
       if (canonicalGitRepository) return repository && root === repository
       return (
@@ -338,8 +401,9 @@ export class Colony {
    */
   setThreads(threads, archivedIds = new Set(), catalog = [], actors = null) {
     const now = Date.now()
+    const visible = visibleTaskCards(threads, now)
     // Known products remain even when quiet; unmatched active threads retain fallback zones.
-    const projects = projectGroups(threads, catalog, archivedIds).sort((a, b) => {
+    const projects = projectGroups(visible, catalog, archivedIds, this.plotCells).sort((a, b) => {
       if (b.threads.length !== a.threads.length) return b.threads.length - a.threads.length
       return a.id.localeCompare(b.id)
     })
@@ -366,6 +430,10 @@ export class Colony {
       // Oldest thread first, so a given session keeps its slot as siblings come and go.
       list.sort((a, b) => a.createdAt - b.createdAt)
 
+      const landmark = repositoryLandmarkFor(project, list.length)
+      this._syncBuilding(landmark.id, plot, 0, { kind: landmark.kind, type: 'repository' })
+      seenBuildings.add(landmark.id)
+
       list.forEach((thread, i) => {
         const status = statusFor(thread, now)
         if (stats[status] !== undefined) stats[status]++
@@ -373,11 +441,11 @@ export class Colony {
         if (status === 'waiting' || status === 'blocked' || status === 'working') active.add(plot.id)
         stats.agents++
 
-        const building = this._syncBuilding(thread, plot, i)
+        const building = this._syncBuilding(thread.id, plot, i + 1, { type: 'task' })
         seenBuildings.add(thread.id)
 
         const location = {
-          site: this._workSite(plot, building, i),
+          site: this._workSite(plot, building, i + 1),
           // Where the work actually is. A working astronaut circles it rather than standing
           // at one spot, so it needs the building, not just a place to stand near it.
           anchor: building.mesh.position.clone(),
@@ -412,7 +480,10 @@ export class Colony {
     // — never because a different repo gained or lost a thread. `plotCells` carries it
     // between polls, and the colony file carries it between sessions.
     const layout = allocateCells(
-      projects.map((project) => ({ id: project.id, size: Math.max(1, project.threads.length) })),
+      projects.map((project) => ({
+        id: project.id,
+        size: repositoryPlotDemand(project, this.plotCells.get(project.id)),
+      })),
       this.plotCells
     )
     // Remembered, not replaced: a project that has just lost its last thread keeps its
@@ -504,22 +575,29 @@ export class Colony {
     return PLOT_PALETTE[start]
   }
 
-  _syncBuilding(thread, plot, index) {
-    let entry = this.buildings.get(thread.id)
+  _syncBuilding(id, plot, index, { kind = null, type = 'task' } = {}) {
+    let entry = this.buildings.get(id)
     // Whole, always. A building that has finished rising is a building you can see all of.
     const target = 1
 
+    // Repository activity tiers swap only between existing catalogue silhouettes. The stable
+    // map key survives the swap, so this never creates a second landmark for the repository.
+    if (entry && entry.kind !== kind) {
+      this._disposeBuilding(id, entry)
+      entry = null
+    }
+
     if (!entry) {
-      const mesh = createBuilding({ seed: hashString(thread.id), accent: plot.accent })
+      const mesh = createBuilding({ seed: hashString(id), accent: plot.accent, kind })
       const pos = plot.worldSlot(index)
       mesh.position.copy(pos)
-      mesh.rotation.y = ((hashString(thread.id) >>> 8) % 360) * (Math.PI / 180)
+      mesh.rotation.y = ((hashString(id) >>> 8) % 360) * (Math.PI / 180)
       // New buildings rise from nothing rather than appearing whole.
       mesh.userData.setProgress(0)
-      mesh.userData.threadId = thread.id
+      mesh.userData.buildingId = id
       this.worldGroup.add(mesh)
-      entry = { mesh, plot: plot.id, slot: index, progress: 0, target, retiring: false }
-      this.buildings.set(thread.id, entry)
+      entry = { mesh, plot: plot.id, slot: index, progress: 0, target, retiring: false, kind, type }
+      this.buildings.set(id, entry)
     } else {
       // Where this building belongs *now*. Comparing the world position rather than the
       // plot id and slot number is what catches a zone that was rebuilt underneath it: the
@@ -544,13 +622,15 @@ export class Colony {
     // reads as a glitch, one that sinks reads as being packed up.
     entry.retiring = true
     entry.target = 0
-    if (entry.progress <= 0.02) {
-      this.worldGroup.remove(entry.mesh)
-      entry.mesh.geometry.dispose()
-      entry.mesh.material.dispose()
-      entry.mesh.customDepthMaterial?.dispose()
-      this.buildings.delete(id)
-    }
+    if (entry.progress <= 0.02) this._disposeBuilding(id, entry)
+  }
+
+  _disposeBuilding(id, entry) {
+    this.worldGroup.remove(entry.mesh)
+    entry.mesh.geometry.dispose()
+    entry.mesh.material.dispose()
+    entry.mesh.customDepthMaterial?.dispose()
+    this.buildings.delete(id)
   }
 
   /**
@@ -892,7 +972,7 @@ export class Colony {
     raycaster.setFromCamera({ x: ndcX, y: ndcY }, this.camera)
     const meshes = [...this.buildings.values()].filter((entry) => !entry.retiring).map((entry) => entry.mesh)
     const hit = raycaster.intersectObjects(meshes, false)[0]
-    return hit ? this.buildingTargetFor(hit.object.userData.threadId) : null
+    return hit ? this.buildingTargetFor(hit.object.userData.buildingId) : null
   }
 
   agentFor(id) {
@@ -902,7 +982,9 @@ export class Colony {
   buildingTargetFor(id) {
     const entry = this.buildings.get(id)
     const thread = this.threads.get(id)
-    if (!entry || entry.retiring || !thread) return null
+    // A repository landmark is plot chrome, not a synthetic task. Returning no task target
+    // lets the existing ground/plot hit path open its repository panel instead.
+    if (!entry || entry.type !== 'task' || entry.retiring || !thread) return null
     let target = entry.targetObject
     if (!target) {
       target = entry.targetObject = {

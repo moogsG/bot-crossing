@@ -1,4 +1,4 @@
-const DEFAULT_CELEBRATION_MS = 2000
+export const COMPLETION_GRACE_MS = 2000
 const LIFECYCLE_EVENTS = new Set([
   'claimed',
   'heartbeat',
@@ -42,7 +42,7 @@ export function reconcileActorSnapshot(state, snapshot, { taskIds, cursor = stat
   }
 }
 
-export function reduceActorBatch(state, events, { now = Date.now(), celebrationMs = DEFAULT_CELEBRATION_MS } = {}) {
+export function reduceActorBatch(state, events, { now = Date.now(), celebrationMs = COMPLETION_GRACE_MS } = {}) {
   const next = {
     cursor: state.cursor,
     actors: new Map(state.actors),
@@ -79,7 +79,7 @@ export function reconcileActorUpdate(
   state,
   snapshot,
   batch,
-  { taskIds, now = Date.now(), celebrationMs = DEFAULT_CELEBRATION_MS }
+  { taskIds, now = Date.now(), celebrationMs = COMPLETION_GRACE_MS }
 ) {
   const boundary = Math.max(0, Number(snapshot?.cursor) || 0)
   const staged = reduceActorBatch(

@@ -214,7 +214,50 @@ test('reads active projects from the profile-scoped HERMES_HOME without mutating
   assert.deepEqual(await fsp.readFile(path.join(profileHome, 'projects.db')), before)
 })
 
-test('keeps every non-archived native-board task as a durable building record', async () => {
+test('aggregates every Hermes project registry independently with canonical repository deduplication', async () => {
+  const { home } = await fixtureHome()
+  const builderHome = path.join(home, 'profiles', 'builder')
+  const jynxHome = path.join(home, 'profiles', 'jynx')
+  const brokenHome = path.join(home, 'profiles', 'broken')
+  const sharedRepository = path.join(home, 'repositories', 'shared')
+  await Promise.all([
+    fsp.mkdir(builderHome, { recursive: true }),
+    fsp.mkdir(jynxHome, { recursive: true }),
+    fsp.mkdir(brokenHome, { recursive: true }),
+    fsp.mkdir(sharedRepository, { recursive: true }),
+  ])
+  createProjectsDatabase(home, [
+    { id: 'p_root', slug: 'z-root', name: 'Root project', primary_path: '/work/root' },
+    { id: 'p_archived', slug: 'archived', name: 'Archived', primary_path: '/work/archived', archived: 1 },
+  ])
+  createProjectsDatabase(builderHome, [
+    { id: 'p_shared_builder', slug: 'shared-builder', name: 'Shared builder copy', primary_path: sharedRepository },
+    { id: 'p_pathless', slug: 'pathless', name: 'Pathless project' },
+  ])
+  createProjectsDatabase(jynxHome, [
+    { id: 'p_alpha', slug: 'alpha', name: 'Alpha project', primary_path: '/work/alpha/' },
+    { id: 'p_shared_jynx', slug: 'shared-jynx', name: 'Shared Jynx copy', primary_path: `${sharedRepository}/.` },
+  ])
+  await fsp.writeFile(path.join(brokenHome, 'projects.db'), 'not a sqlite database')
+  process.env.HERMES_HOME = builderHome
+
+  const projects = await hermesKanban.scanProjects()
+  const canonicalSharedRepository = await fsp.realpath(sharedRepository)
+
+  assert.deepEqual(projects, [
+    { id: 'p_alpha', slug: 'alpha', name: 'Alpha project', path: '/work/alpha' },
+    { id: 'p_pathless', slug: 'pathless', name: 'Pathless project', path: '' },
+    {
+      id: 'p_shared_builder',
+      slug: 'shared-builder',
+      name: 'Shared builder copy',
+      path: canonicalSharedRepository,
+    },
+    { id: 'p_root', slug: 'z-root', name: 'Root project', path: '/work/root' },
+  ])
+})
+
+test('projects every non-archived native-board task for colony lifecycle filtering', async () => {
   const { home, databasePath } = await fixtureHome()
   process.env.HERMES_HOME = home
   for (const status of ['ready', 'running', 'review', 'blocked', 'todo', 'done', 'triage', 'archived']) {
@@ -454,6 +497,37 @@ test('maps task details and heartbeat without consulting run end time', async ()
     lastHeartbeatAt: 150000,
   })
   assert.equal(JSON.stringify(thread).includes('999999'), false)
+})
+
+test('projects completion time while preserving repository, worktree, and lifecycle metadata', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  insertTask(databasePath, {
+    id: 't_completed_projection',
+    status: 'done',
+    completed_at: 321,
+    workspace_kind: 'worktree',
+    workspace_path: '/work/repo/.worktrees/t_completed_projection',
+    branch_name: 'repo/t_completed_projection',
+    project_id: 'p_repo',
+    current_run_id: 8,
+  })
+  insertRun(databasePath, {
+    id: 8,
+    task_id: 't_completed_projection',
+    profile: 'builder',
+    status: 'done',
+    started_at: 300,
+  })
+
+  const [thread] = await hermesKanban.scanThreads()
+
+  assert.equal(thread.completedAt, 321000)
+  assert.equal(thread.worktree, 't_completed_projection')
+  assert.equal(thread.gitBranch, 'repo/t_completed_projection')
+  assert.equal(thread.projectId, 'p_repo')
+  assert.equal(thread.ref.status, 'done')
+  assert.equal(thread.ref.worker.runStatus, 'done')
 })
 
 test('normalizes an active review claim into one stable task-linked reviewing actor', async () => {
