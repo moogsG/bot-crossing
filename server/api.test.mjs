@@ -6,6 +6,12 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import { apiMiddleware, readActorSnapshot } from './api.mjs'
+import {
+  createActorState,
+  reconcileActorSnapshot,
+  reconcileActorUpdate,
+  visibleActors,
+} from '../src/game/actor-lifecycle.js'
 
 const temporaryHomes = []
 const originalHermesHome = process.env.HERMES_HOME
@@ -104,6 +110,7 @@ test('actor snapshot captures its cursor before a transition can make the actor 
   process.env.HERMES_HOME = home
   const databasePath = path.join(home, 'kanban', 'boards', 'native', 'kanban.db')
   const workingActor = { id: 'hermes-kanban:actor:t_api:7', lifecycleState: 'working' }
+  let transitioned = false
 
   const snapshot = await readActorSnapshot({
     readCursor: async () => {
@@ -115,6 +122,8 @@ test('actor snapshot captures its cursor before a transition can make the actor 
       }
     },
     readActors: async () => {
+      if (transitioned) return []
+      transitioned = true
       const db = new DatabaseSync(databasePath)
       db.exec(`
         BEGIN;
@@ -135,8 +144,65 @@ test('actor snapshot captures its cursor before a transition can make the actor 
 
   assert.equal(snapshot.cursor, 0)
   assert.equal(snapshot.through, 1)
-  assert.deepEqual(snapshot.actors, [workingActor])
+  assert.deepEqual(snapshot.actors, [])
   assert.deepEqual(capture.result().body.events.map(({ id, kind }) => [id, kind]), [[1, 'completed']])
+})
+
+test('actor snapshot rescans a run claimed after the first actor scan', async () => {
+  const claimedActor = { id: 'hermes-kanban:actor:t_new:8', taskId: 't_new', runId: 8, lifecycleState: 'working' }
+  const cursors = [20, 21, 21]
+  const scans = [[], [claimedActor]]
+
+  const snapshot = await readActorSnapshot({
+    readCursor: async () => cursors.shift(),
+    readActors: async () => scans.shift(),
+  })
+
+  assert.equal(snapshot.cursor, 20)
+  assert.equal(snapshot.through, 21)
+  assert.deepEqual(snapshot.actors, [claimedActor])
+  assert.equal(scans.length, 0)
+
+  const state = reconcileActorUpdate(
+    createActorState(),
+    snapshot,
+    { cursor: 21, events: [{ id: 21, taskId: 't_new', runId: 8, kind: 'claimed' }] },
+    { taskIds: new Set(['t_new']), now: 1000 }
+  )
+  assert.deepEqual(visibleActors(state), [claimedActor])
+})
+
+test('actor snapshot rescans a stale working actor after a state and attention transition', async () => {
+  const workingActor = {
+    id: 'hermes-kanban:actor:t_live:7',
+    taskId: 't_live',
+    runId: 7,
+    lifecycleState: 'working',
+    requiresMorgan: false,
+  }
+  const waitingActor = { ...workingActor, lifecycleState: 'waiting', requiresMorgan: true }
+  const cursors = [20, 21, 21]
+  const scans = [[workingActor], [waitingActor]]
+  const snapshot = await readActorSnapshot({
+    readCursor: async () => cursors.shift(),
+    readActors: async () => scans.shift(),
+  })
+  const prior = reconcileActorSnapshot(createActorState(), [workingActor], {
+    taskIds: new Set(['t_live']),
+    cursor: 20,
+    now: 900,
+  })
+
+  const state = reconcileActorUpdate(
+    prior,
+    snapshot,
+    { cursor: 21, events: [{ id: 21, taskId: 't_live', runId: 7, kind: 'blocked' }] },
+    { taskIds: new Set(['t_live']), now: 1000 }
+  )
+
+  assert.equal(snapshot.cursor, 20)
+  assert.equal(snapshot.through, 21)
+  assert.deepEqual(visibleActors(state), [waitingActor])
 })
 
 test('GET /api/events returns an ordered no-store lifecycle cursor', async () => {

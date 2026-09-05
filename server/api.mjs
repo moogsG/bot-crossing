@@ -26,9 +26,14 @@ const STATE_VERSION = 1
 
 export async function readActorSnapshot({ readCursor = actorEventCursor, readActors = scanActors } = {}) {
   const cursor = await readCursor()
-  const actors = await readActors()
-  const through = await readCursor()
-  return { actors, cursor, through }
+  let scanCursor = cursor
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const actors = await readActors()
+    const through = await readCursor()
+    if (through === scanCursor) return { actors, cursor, through }
+    scanCursor = through
+  }
+  throw new Error('Lifecycle events kept changing during the actor snapshot')
 }
 
 /**
