@@ -11,6 +11,7 @@ import {
   DECK_TOP,
   PLOT_PALETTE,
   PLOT_CELL,
+  SLOTS_PER_CELL,
 } from '../world/plots.js'
 import { createBuilding, buildingUniforms, Scaffolds } from '../world/buildings.js'
 import { Ship } from '../world/ship.js'
@@ -166,6 +167,16 @@ export function repositoryLandmarkFor(project, activeCards = project?.threads?.l
     kind: count >= 5 ? 'tower' : count >= 2 ? 'workshop' : 'habitat',
     project,
   }
+}
+
+/**
+ * Territory grows when the landmark and visible worksites exhaust the established slots.
+ * Remembering whole-cell capacity makes that growth cumulative without persisting task data.
+ */
+export function repositoryPlotDemand(project, rememberedCells = []) {
+  const visibleDemand = Math.max(1, (project?.threads?.length || 0) + 1)
+  const rememberedCapacity = Array.isArray(rememberedCells) ? rememberedCells.length * SLOTS_PER_CELL : 0
+  return Math.max(visibleDemand, rememberedCapacity)
 }
 
 /** Recover repository presentation from a saved plot id without turning it into a task. */
@@ -469,7 +480,10 @@ export class Colony {
     // — never because a different repo gained or lost a thread. `plotCells` carries it
     // between polls, and the colony file carries it between sessions.
     const layout = allocateCells(
-      projects.map((project) => ({ id: project.id, size: Math.max(1, project.threads.length + 1) })),
+      projects.map((project) => ({
+        id: project.id,
+        size: repositoryPlotDemand(project, this.plotCells.get(project.id)),
+      })),
       this.plotCells
     )
     // Remembered, not replaced: a project that has just lost its last thread keeps its

@@ -7,10 +7,12 @@ const {
   actorRosterEntries,
   projectGroups,
   repositoryLandmarkFor,
+  repositoryPlotDemand,
   visibleTaskCards,
   wantsMorganAttention,
 } = await vite.ssrLoadModule('/src/game/colony.js')
 const { COMPLETION_GRACE_MS } = await vite.ssrLoadModule('/src/game/actor-lifecycle.js')
+const { allocateCells, SLOTS_PER_CELL } = await vite.ssrLoadModule('/src/world/plots.js')
 await vite.close()
 
 test('known projects persist without agents and matching tasks share their stable zone', () => {
@@ -264,6 +266,34 @@ test('saved repository plots remain quiet landmarks when the catalog is empty wi
       },
     ]
   )
+})
+
+test('repository territory grows for visible worksites, remembers capacity, and stays capped without restoring history', () => {
+  const oneCell = [{ q: 0, r: 0 }]
+  const threeCells = [oneCell[0], { q: 1, r: 0 }, { q: 0, r: 1 }]
+  const nineCells = Array.from({ length: 9 }, (_, q) => ({ q, r: 0 }))
+
+  assert.equal(SLOTS_PER_CELL, 7)
+  assert.equal(repositoryPlotDemand({ threads: [] }, []), 1)
+  assert.equal(repositoryPlotDemand({ threads: Array(6).fill({}) }, oneCell), SLOTS_PER_CELL)
+  assert.equal(repositoryPlotDemand({ threads: Array(7).fill({}) }, oneCell), SLOTS_PER_CELL + 1)
+  assert.equal(repositoryPlotDemand({ threads: [] }, threeCells), 3 * SLOTS_PER_CELL)
+
+  const capped = allocateCells(
+    [{ id: 'repository', size: repositoryPlotDemand({ threads: Array(100).fill({}) }, nineCells) }],
+    new Map([['repository', nineCells]])
+  )
+  assert.equal(capped.get('repository').length, 9)
+
+  const completed = {
+    id: 'hermes-kanban:t_history',
+    source: 'native-kanban',
+    completedAt: 10_000,
+    ref: { status: 'done', taskId: 't_history' },
+  }
+  const visible = visibleTaskCards([completed], 10_000 + COMPLETION_GRACE_MS)
+  assert.deepEqual(visible, [])
+  assert.equal(repositoryPlotDemand({ threads: visible }, threeCells), 3 * SLOTS_PER_CELL)
 })
 
 test('only explicit Hermes attention makes a task Morgan-facing while legacy waits stay compatible', () => {
