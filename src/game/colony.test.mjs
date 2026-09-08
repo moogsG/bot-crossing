@@ -7,6 +7,7 @@ const {
   Colony,
   actorRosterEntries,
   projectGroups,
+  repositoryBuildingsFor,
   repositoryLandmarkFor,
   repositoryPlotDemand,
   visibleTaskCards,
@@ -194,23 +195,71 @@ test('repository landmarks derive stable identity and silhouette only from Codeb
   assert.equal(repositoryLandmarkFor({ ...project, threads: Array(20).fill({}) }).kind, 'habitat')
 })
 
-test('project groups preserve optional Codebase Memory size tiers from the catalog', () => {
+test('territory tiers create exact stable repository buildings at every cell center', () => {
+  const project = {
+    id: 'bot-crossing',
+    codebaseSizeTier: 'large',
+    codebaseTerritoryTier: 'xxl',
+  }
+
+  assert.deepEqual(repositoryBuildingsFor(project), [
+    { id: 'repository:bot-crossing', kind: 'tower', type: 'repository', slot: 0 },
+    { id: 'repository:bot-crossing:annex:1', kind: 'solar', type: 'repository-annex', slot: 7 },
+    { id: 'repository:bot-crossing:annex:2', kind: 'antenna', type: 'repository-annex', slot: 14 },
+    { id: 'repository:bot-crossing:annex:3', kind: 'silo', type: 'repository-annex', slot: 21 },
+    { id: 'repository:bot-crossing:annex:4', kind: 'greenhouse', type: 'repository-annex', slot: 28 },
+    { id: 'repository:bot-crossing:annex:5', kind: 'reactor', type: 'repository-annex', slot: 35 },
+    { id: 'repository:bot-crossing:annex:6', kind: 'pad', type: 'repository-annex', slot: 42 },
+    { id: 'repository:bot-crossing:annex:7', kind: 'lab', type: 'repository-annex', slot: 49 },
+    { id: 'repository:bot-crossing:annex:8', kind: 'habitat', type: 'repository-annex', slot: 56 },
+  ])
+  assert.deepEqual(
+    ['xs', 'small', 'medium', 'large', 'xl', 'xxl'].map((tier) =>
+      repositoryBuildingsFor({ ...project, codebaseTerritoryTier: tier }).length
+    ),
+    [1, 2, 3, 5, 7, 9]
+  )
+  assert.equal(repositoryBuildingsFor(project).filter(({ type }) => type === 'repository').length, 1)
+  assert.deepEqual(repositoryBuildingsFor({ ...project, codebaseTerritoryTier: 'invalid' }), [
+    { id: 'repository:bot-crossing', kind: 'tower', type: 'repository', slot: 0 },
+  ])
+  assert.equal(
+    repositoryBuildingsFor({ ...project, codebaseTerritoryTier: 'small' })[0].id,
+    repositoryBuildingsFor({ ...project, codebaseTerritoryTier: 'xl' })[0].id
+  )
+})
+
+test('project groups preserve both optional Codebase Memory tiers from the catalog', () => {
   const groups = projectGroups([], [
-    { id: 'p_small', slug: 'small', name: 'Small', path: '/work/small', codebaseSizeTier: 'small' },
+    {
+      id: 'p_small',
+      slug: 'small',
+      name: 'Small',
+      path: '/work/small',
+      codebaseSizeTier: 'small',
+      codebaseTerritoryTier: 'xl',
+    },
     { id: 'p_unknown', slug: 'unknown', name: 'Unknown', path: '/work/unknown' },
   ])
 
   assert.equal(groups[0].codebaseSizeTier, 'small')
+  assert.equal(groups[0].codebaseTerritoryTier, 'xl')
   assert.equal(Object.hasOwn(groups[1], 'codebaseSizeTier'), false)
+  assert.equal(Object.hasOwn(groups[1], 'codebaseTerritoryTier'), false)
 })
 
-test('Codebase Memory size tiers set persistent mixed repository territory floors', () => {
+test('territory tiers set exact mixed repository floors with legacy fallback and precedence', () => {
   const projects = [
     { id: 'missing', threads: [] },
-    { id: 'invalid', codebaseSizeTier: 'enormous', threads: [] },
-    { id: 'small', codebaseSizeTier: 'small', threads: [] },
-    { id: 'medium', codebaseSizeTier: 'medium', threads: [] },
-    { id: 'large', codebaseSizeTier: 'large', threads: [] },
+    { id: 'invalid', codebaseTerritoryTier: 'enormous', threads: [] },
+    { id: 'legacy-medium', codebaseSizeTier: 'medium', threads: [] },
+    { id: 'legacy-large', codebaseSizeTier: 'large', threads: [] },
+    { id: 'xs', codebaseTerritoryTier: 'xs', codebaseSizeTier: 'large', threads: [] },
+    { id: 'small', codebaseTerritoryTier: 'small', threads: [] },
+    { id: 'medium', codebaseTerritoryTier: 'medium', threads: [] },
+    { id: 'large', codebaseTerritoryTier: 'large', threads: [] },
+    { id: 'xl', codebaseTerritoryTier: 'xl', threads: [] },
+    { id: 'xxl', codebaseTerritoryTier: 'xxl', threads: [] },
   ]
   const layout = allocateCells(
     projects.map((project) => ({ id: project.id, size: repositoryPlotDemand(project) }))
@@ -221,9 +270,14 @@ test('Codebase Memory size tiers set persistent mixed repository territory floor
     [
       ['missing', 1],
       ['invalid', 1],
-      ['small', 1],
-      ['medium', 2],
-      ['large', 3],
+      ['legacy-medium', 2],
+      ['legacy-large', 3],
+      ['xs', 1],
+      ['small', 2],
+      ['medium', 3],
+      ['large', 5],
+      ['xl', 7],
+      ['xxl', 9],
     ]
   )
 
@@ -256,11 +310,11 @@ test('Codebase Memory size tiers set persistent mixed repository territory floor
     }
   }
 
-  const remembered = layout.get('large')
-  assert.equal(repositoryPlotDemand({ codebaseSizeTier: 'medium', threads: [] }, remembered), 3 * SLOTS_PER_CELL)
+  const remembered = layout.get('medium')
+  assert.equal(repositoryPlotDemand({ codebaseTerritoryTier: 'small', threads: [] }, remembered), 3 * SLOTS_PER_CELL)
   assert.equal(repositoryPlotDemand({ threads: [] }, remembered), 3 * SLOTS_PER_CELL)
   assert.equal(
-    repositoryPlotDemand({ codebaseSizeTier: 'small', threads: Array(14).fill({}) }),
+    repositoryPlotDemand({ codebaseTerritoryTier: 'small', threads: Array(13).fill({}) }),
     2 * SLOTS_PER_CELL + 1
   )
 })
@@ -483,6 +537,146 @@ test('a visible native task keeps its building, repository Jynx, and current wor
       },
     ]
   )
+})
+
+test('repository annex centers stay reserved while task slots overflow into earned cells', () => {
+  const threads = Array.from({ length: 20 }, (_, index) => ({
+    id: `task:${index}`,
+    project: 'campus',
+    createdAt: index,
+  }))
+  const synced = []
+  const plot = { id: 'campus' }
+  const colony = {
+    plotCells: new Map(),
+    plots: new Map([['campus', plot]]),
+    buildings: new Map(),
+    _syncPlots(projects) {
+      assert.equal(
+        allocateCells(projects.map((project) => ({ id: project.id, size: repositoryPlotDemand(project) }))).get(
+          'campus'
+        ).length,
+        4
+      )
+    },
+    _syncBuilding(id, _plot, slot, options) {
+      synced.push({ id, slot, ...options })
+      return { mesh: { position: { clone: () => `anchor:${slot}` } } }
+    },
+    _workSite(_plot, _building, slot) {
+      return `site:${slot}`
+    },
+    _world() {
+      return {}
+    },
+    _rebuildNavigation() {},
+    astronauts: { setRoster() {} },
+  }
+
+  Colony.prototype.setThreads.call(colony, threads, new Set(), [
+    {
+      id: 'p_campus',
+      slug: 'campus',
+      name: 'Campus',
+      path: '/work/campus',
+      codebaseSizeTier: 'medium',
+      codebaseTerritoryTier: 'medium',
+    },
+  ])
+
+  assert.deepEqual(
+    synced.slice(0, 3),
+    repositoryBuildingsFor({
+      id: 'campus',
+      codebaseSizeTier: 'medium',
+      codebaseTerritoryTier: 'medium',
+    })
+  )
+  const taskSlots = synced.filter(({ type }) => type === 'task').map(({ slot }) => slot)
+  assert.deepEqual(taskSlots, [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22])
+  assert.equal(new Set(synced.map(({ slot }) => slot)).size, synced.length)
+})
+
+test('tier changes keep the primary campus while archived tasks and workers are reconciled away', () => {
+  const thread = {
+    id: 'hermes-kanban:t_archived',
+    project: 'campus',
+    source: 'native-kanban',
+    createdAt: 1,
+    ref: { taskId: 't_archived', status: 'running' },
+  }
+  const actor = {
+    id: 'hermes-kanban:actor:t_archived:12',
+    taskId: 't_archived',
+    runId: 12,
+    profile: 'builder',
+    lifecycleState: 'working',
+    requiresMorgan: false,
+  }
+  const plot = { id: 'campus' }
+  let roster = []
+  const removed = []
+  const colony = {
+    plotCells: new Map(),
+    plots: new Map([['campus', plot]]),
+    buildings: new Map(),
+    _syncPlots() {},
+    _syncBuilding(id, _plot, slot, options) {
+      let entry = this.buildings.get(id)
+      if (!entry) {
+        entry = { id, slot, ...options, mesh: { position: { clone: () => `anchor:${slot}` } } }
+        this.buildings.set(id, entry)
+      }
+      return entry
+    },
+    _removeBuilding(id) {
+      removed.push(id)
+      this.buildings.delete(id)
+    },
+    _workSite(_plot, _building, slot) {
+      return `site:${slot}`
+    },
+    _world() {
+      return {}
+    },
+    _rebuildNavigation() {},
+    astronauts: { setRoster(entries) { roster = entries } },
+  }
+  const catalog = (territoryTier) => [
+    {
+      id: 'p_campus',
+      slug: 'campus',
+      name: 'Campus',
+      path: '/work/campus',
+      codebaseSizeTier: 'large',
+      codebaseTerritoryTier: territoryTier,
+    },
+  ]
+
+  Colony.prototype.setThreads.call(colony, [thread], new Set(), catalog('medium'), [actor])
+  const primary = colony.buildings.get('repository:campus')
+  assert.ok(primary)
+  assert.ok(colony.buildings.has(thread.id))
+  assert.deepEqual(roster.map(({ id }) => id), [actor.id, 'repository:campus:jynx'])
+
+  Colony.prototype.setThreads.call(colony, [thread], new Set([thread.id]), catalog('xl'), [actor])
+
+  assert.equal(colony.buildings.get('repository:campus'), primary)
+  assert.deepEqual(
+    [...colony.buildings.keys()],
+    [
+      'repository:campus',
+      'repository:campus:annex:1',
+      'repository:campus:annex:2',
+      'repository:campus:annex:3',
+      'repository:campus:annex:4',
+      'repository:campus:annex:5',
+      'repository:campus:annex:6',
+    ]
+  )
+  assert.deepEqual(removed, [thread.id])
+  assert.equal(colony.threads.has(thread.id), false)
+  assert.deepEqual(roster, [])
 })
 
 test('several repository tasks reuse one Jynx for runless Morgan attention without a stale worker', () => {
