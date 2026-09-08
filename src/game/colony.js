@@ -190,14 +190,39 @@ export function repositoryLandmarkFor(project) {
   }
 }
 
+const TERRITORY_CELL_FLOORS = { xs: 1, small: 2, medium: 3, large: 5, xl: 7, xxl: 9 }
+const ANNEX_KINDS = ['solar', 'antenna', 'silo', 'greenhouse', 'reactor', 'pad', 'lab', 'habitat']
+
+const territoryCellFloor = (project) => {
+  const territoryFloor = TERRITORY_CELL_FLOORS[project?.codebaseTerritoryTier]
+  if (territoryFloor) return territoryFloor
+  return { small: 1, medium: 2, large: 3 }[project?.codebaseSizeTier] || 1
+}
+
+/** One primary landmark plus a stable annex at each additional tier-owned cell center. */
+export function repositoryBuildingsFor(project) {
+  const landmark = repositoryLandmarkFor(project)
+  const buildings = [{ id: landmark.id, kind: landmark.kind, type: 'repository', slot: 0 }]
+  const territoryFloor = TERRITORY_CELL_FLOORS[project?.codebaseTerritoryTier]
+  if (!territoryFloor) return buildings
+  for (let index = 1; index < territoryFloor; index += 1) {
+    buildings.push({
+      id: `${landmark.id}:annex:${index}`,
+      kind: ANNEX_KINDS[index - 1],
+      type: 'repository-annex',
+      slot: index * SLOTS_PER_CELL,
+    })
+  }
+  return buildings
+}
+
 /**
- * Codebase Memory size sets the initial territory floor, while visible worksites can grow it.
+ * Codebase Memory territory tier sets the floor, while visible worksites can grow it.
  * Remembering whole-cell capacity makes that growth cumulative without persisting task data.
  */
 export function repositoryPlotDemand(project, rememberedCells = []) {
-  const visibleDemand = Math.max(1, (project?.threads?.length || 0) + 1)
-  const tierDemand =
-    { medium: SLOTS_PER_CELL + 1, large: 2 * SLOTS_PER_CELL + 1 }[project?.codebaseSizeTier] || 1
+  const visibleDemand = (project?.threads?.length || 0) + repositoryBuildingsFor(project).length
+  const tierDemand = (territoryCellFloor(project) - 1) * SLOTS_PER_CELL + 1
   const rememberedCapacity = Array.isArray(rememberedCells) ? rememberedCells.length * SLOTS_PER_CELL : 0
   return Math.max(visibleDemand, tierDemand, rememberedCapacity)
 }
@@ -225,6 +250,7 @@ export function projectGroups(threads, catalog = [], archivedIds = new Set(), sa
       threads: [],
     }
     if (project.codebaseSizeTier) group.codebaseSizeTier = project.codebaseSizeTier
+    if (project.codebaseTerritoryTier) group.codebaseTerritoryTier = project.codebaseTerritoryTier
     groups.set(project.slug, group)
   }
 
@@ -455,9 +481,13 @@ export class Colony {
       // Oldest thread first, so a given session keeps its slot as siblings come and go.
       list.sort((a, b) => a.createdAt - b.createdAt)
 
-      const landmark = repositoryLandmarkFor(project)
-      this._syncBuilding(landmark.id, plot, 0, { kind: landmark.kind, type: 'repository' })
-      seenBuildings.add(landmark.id)
+      const repositoryBuildings = repositoryBuildingsFor(project)
+      const reservedSlots = new Set()
+      for (const building of repositoryBuildings) {
+        this._syncBuilding(building.id, plot, building.slot, { kind: building.kind, type: building.type })
+        seenBuildings.add(building.id)
+        reservedSlots.add(building.slot)
+      }
 
       list.forEach((thread, i) => {
         const status = statusFor(thread, now)
@@ -466,11 +496,15 @@ export class Colony {
         if (status === 'waiting' || status === 'blocked' || status === 'working') active.add(plot.id)
         stats.agents++
 
-        const building = this._syncBuilding(thread.id, plot, i + 1, { type: 'task' })
+        let taskSlot = i
+        for (const reserved of reservedSlots) {
+          if (taskSlot >= reserved) taskSlot += 1
+        }
+        const building = this._syncBuilding(thread.id, plot, taskSlot, { type: 'task' })
         seenBuildings.add(thread.id)
 
         const location = {
-          site: this._workSite(plot, building, i + 1),
+          site: this._workSite(plot, building, taskSlot),
           // Where the work actually is. A working astronaut circles it rather than standing
           // at one spot, so it needs the building, not just a place to stand near it.
           anchor: building.mesh.position.clone(),
@@ -605,7 +639,7 @@ export class Colony {
     // Whole, always. A building that has finished rising is a building you can see all of.
     const target = 1
 
-    // Repository activity tiers swap only between existing catalogue silhouettes. The stable
+    // Repository size tiers swap only between existing catalogue silhouettes. The stable
     // map key survives the swap, so this never creates a second landmark for the repository.
     if (entry && entry.kind !== kind) {
       this._disposeBuilding(id, entry)

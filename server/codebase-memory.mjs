@@ -113,6 +113,16 @@ export function codebaseSizeTier(nodes) {
   return 'small'
 }
 
+export function codebaseTerritoryTier(nodes) {
+  if (!Number.isInteger(nodes) || nodes < 0) return undefined
+  if (nodes >= 50_000) return 'xxl'
+  if (nodes >= 20_000) return 'xl'
+  if (nodes >= 10_000) return 'large'
+  if (nodes >= 2_000) return 'medium'
+  if (nodes >= 500) return 'small'
+  return 'xs'
+}
+
 export function parseProjectSnapshot(stdout, _stderr = '') {
   const payload = JSON.parse(String(stdout || ''))
   if (!Array.isArray(payload?.projects)) throw new Error('Codebase Memory returned an invalid project catalog')
@@ -194,7 +204,10 @@ export function createCodebaseMemoryEnricher({
         const root = await canonicalizeCatalog(project?.path)
         const indexed = byRoot.get(root)
         const tier = indexed && codebaseSizeTier(indexed.nodes)
-        return tier ? { ...project, codebaseSizeTier: tier } : project
+        const territoryTier = indexed && codebaseTerritoryTier(indexed.nodes)
+        return tier && territoryTier
+          ? { ...project, codebaseSizeTier: tier, codebaseTerritoryTier: territoryTier }
+          : project
       })
     )
   }

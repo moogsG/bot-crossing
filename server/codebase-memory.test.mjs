@@ -6,6 +6,7 @@ import { test } from 'node:test'
 
 import {
   codebaseSizeTier,
+  codebaseTerritoryTier,
   createCodebaseMemoryEnricher,
   execFileWithClosedStdin,
   parseProjectSnapshot,
@@ -90,6 +91,31 @@ test('node counts map to the exact repository size tier boundaries', () => {
   assert.equal(codebaseSizeTier('2000'), undefined)
 })
 
+test('node counts map to all six exact repository territory tier boundaries', () => {
+  const boundaries = [
+    [0, 'xs'],
+    [499, 'xs'],
+    [500, 'small'],
+    [1_999, 'small'],
+    [2_000, 'medium'],
+    [9_999, 'medium'],
+    [10_000, 'large'],
+    [19_999, 'large'],
+    [20_000, 'xl'],
+    [49_999, 'xl'],
+    [50_000, 'xxl'],
+    [Number.MAX_SAFE_INTEGER, 'xxl'],
+  ]
+
+  assert.deepEqual(
+    boundaries.map(([nodes]) => codebaseTerritoryTier(nodes)),
+    boundaries.map(([, tier]) => tier)
+  )
+  for (const invalid of [-1, 1.5, '2000', NaN, Infinity, null, undefined]) {
+    assert.equal(codebaseTerritoryTier(invalid), undefined)
+  }
+})
+
 test('project snapshot parses stdout while ignoring process stderr logs', () => {
   const snapshot = parseProjectSnapshot(output([indexedProject()]), 'level=info msg=mem.init')
 
@@ -130,7 +156,9 @@ test('catalog enrichment matches canonical roots and resolves duplicate indexes 
     canonicalize: async (value) => (value === '/worktree/app' ? '/repos/app' : value),
   })
 
-  assert.deepEqual(enriched, [{ ...catalog[0], codebaseSizeTier: 'medium' }])
+  assert.deepEqual(enriched, [
+    { ...catalog[0], codebaseSizeTier: 'medium', codebaseTerritoryTier: 'medium' },
+  ])
   assert.deepEqual(calls, [
     ['/opt/codebase-memory-mcp', ['cli', 'list_projects'], { timeout: 5_000, maxBuffer: 1024 * 1024 }],
   ])
@@ -161,7 +189,11 @@ test('concurrent cold enrichment shares one refresh and cannot overwrite the sna
 
   const results = await Promise.all(requests)
   assert.equal(processes, 1)
-  assert.ok(results.every(([project]) => project.codebaseSizeTier === 'medium'))
+  assert.ok(
+    results.every(
+      ([project]) => project.codebaseSizeTier === 'medium' && project.codebaseTerritoryTier === 'medium'
+    )
+  )
 })
 
 test('failure keeps the original catalog before first success and last-known-good after success', async () => {
@@ -185,9 +217,13 @@ test('failure keeps the original catalog before first success and last-known-goo
   assert.strictEqual(await enrich(catalog), catalog)
   assert.equal(attempt, 1)
   clock = 11
-  assert.deepEqual(await enrich(catalog), [{ ...catalog[0], codebaseSizeTier: 'large' }])
+  assert.deepEqual(await enrich(catalog), [
+    { ...catalog[0], codebaseSizeTier: 'large', codebaseTerritoryTier: 'xl' },
+  ])
   clock = 22
-  assert.deepEqual(await enrich(catalog), [{ ...catalog[0], codebaseSizeTier: 'large' }])
+  assert.deepEqual(await enrich(catalog), [
+    { ...catalog[0], codebaseSizeTier: 'large', codebaseTerritoryTier: 'xl' },
+  ])
 })
 
 test('clock rollback expires both failed and successful cache entries', async () => {
@@ -209,9 +245,13 @@ test('clock rollback expires both failed and successful cache entries', async ()
 
   assert.strictEqual(await enrich(catalog), catalog)
   clock = 90
-  assert.deepEqual(await enrich(catalog), [{ ...catalog[0], codebaseSizeTier: 'medium' }])
+  assert.deepEqual(await enrich(catalog), [
+    { ...catalog[0], codebaseSizeTier: 'medium', codebaseTerritoryTier: 'medium' },
+  ])
   clock = 80
-  assert.deepEqual(await enrich(catalog), [{ ...catalog[0], codebaseSizeTier: 'large' }])
+  assert.deepEqual(await enrich(catalog), [
+    { ...catalog[0], codebaseSizeTier: 'large', codebaseTerritoryTier: 'xl' },
+  ])
   assert.equal(attempt, 3)
 })
 
