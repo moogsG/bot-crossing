@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { scanActorSnapshotsFrom, scanProjectCatalogFrom } from './scan.mjs'
+import { scanActorSnapshotsFrom, scanProjectCatalogFrom, scanProjectsFrom } from './scan.mjs'
 
 test('project catalog aggregation is stable, deduplicated, and fault isolated', async () => {
   const warnings = []
@@ -29,6 +29,21 @@ test('project catalog aggregation is stable, deduplicated, and fault isolated', 
   ])
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /broken registry/)
+})
+
+test('Codebase Memory enrichment failure never breaks project catalog semantics', async () => {
+  const catalog = [{ id: 'p_one', slug: 'one', name: 'One', path: '/work/one' }]
+  const warnings = []
+
+  const projects = await scanProjectsFrom(
+    [{ id: 'catalog', scanProjects: async () => catalog }],
+    async () => Promise.reject(new Error('memory unavailable')),
+    (message) => warnings.push(message)
+  )
+
+  assert.deepEqual(projects, catalog)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /memory unavailable/)
 })
 
 test('actor aggregation is stable, deduplicated, and fault isolated', async () => {

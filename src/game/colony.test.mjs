@@ -179,19 +179,29 @@ test('archived tasks do not create agents or fallback zones', () => {
   assert.deepEqual(groups, [{ id: 'perch', name: 'Perch', path: '/work/perch', threads: [] }])
 })
 
-test('repository landmarks keep stable identity and capped S, M, and L silhouettes', () => {
-  const project = { id: 'bot-crossing', name: 'Bot Crossing' }
+test('repository landmarks derive stable identity and silhouette only from Codebase Memory size', () => {
+  const project = { id: 'bot-crossing', name: 'Bot Crossing', codebaseSizeTier: 'small' }
 
-  assert.deepEqual(repositoryLandmarkFor(project, 0), {
+  assert.deepEqual(repositoryLandmarkFor(project), {
     id: 'repository:bot-crossing',
     kind: 'habitat',
     project,
   })
-  assert.equal(repositoryLandmarkFor(project, 1).kind, 'habitat')
-  assert.equal(repositoryLandmarkFor(project, 2).kind, 'workshop')
-  assert.equal(repositoryLandmarkFor(project, 4).kind, 'workshop')
-  assert.equal(repositoryLandmarkFor(project, 5).kind, 'tower')
-  assert.equal(repositoryLandmarkFor(project, 50).kind, 'tower')
+  assert.equal(repositoryLandmarkFor({ ...project, codebaseSizeTier: 'medium' }).kind, 'workshop')
+  assert.equal(repositoryLandmarkFor({ ...project, codebaseSizeTier: 'large' }).kind, 'tower')
+  assert.equal(repositoryLandmarkFor({ ...project, codebaseSizeTier: 'invalid' }).kind, 'habitat')
+  assert.equal(repositoryLandmarkFor({ id: project.id }).kind, 'habitat')
+  assert.equal(repositoryLandmarkFor({ ...project, threads: Array(20).fill({}) }).kind, 'habitat')
+})
+
+test('project groups preserve optional Codebase Memory size tiers from the catalog', () => {
+  const groups = projectGroups([], [
+    { id: 'p_small', slug: 'small', name: 'Small', path: '/work/small', codebaseSizeTier: 'small' },
+    { id: 'p_unknown', slug: 'unknown', name: 'Unknown', path: '/work/unknown' },
+  ])
+
+  assert.equal(groups[0].codebaseSizeTier, 'small')
+  assert.equal(Object.hasOwn(groups[1], 'codebaseSizeTier'), false)
 })
 
 test('native completed worksites remain for exactly the shared grace interval', () => {

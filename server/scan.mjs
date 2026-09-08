@@ -7,6 +7,7 @@
  * in `server/harnesses/` — see the README there.
  */
 import { HARNESSES, detectedHarnesses, harnessById } from './harnesses/index.mjs'
+import { enrichProjectCatalog } from './codebase-memory.mjs'
 
 /**
  * A project's ground is keyed on its name, and a name is the last segment of its path — so two
@@ -100,8 +101,22 @@ export async function scanProjectCatalogFrom(harnesses, warn = (message) => cons
   return [...bySlug.values()].sort((a, b) => a.slug.localeCompare(b.slug) || a.id.localeCompare(b.id))
 }
 
+export async function scanProjectsFrom(
+  harnesses,
+  enrich = enrichProjectCatalog,
+  warn = (message) => console.warn(message)
+) {
+  const catalog = await scanProjectCatalogFrom(harnesses, warn)
+  try {
+    return await enrich(catalog)
+  } catch (err) {
+    warn(`bot-crossing: Codebase Memory failed to scan projects — ${err?.message || err}`)
+    return catalog
+  }
+}
+
 export async function scanProjects() {
-  return scanProjectCatalogFrom(await detectedHarnesses())
+  return scanProjectsFrom(await detectedHarnesses())
 }
 
 /** Current task-linked run actors, isolated and deduplicated by their stable actor id. */
