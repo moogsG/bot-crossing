@@ -4,6 +4,7 @@ import { createServer } from 'vite'
 
 const vite = await createServer({ server: { middlewareMode: true, hmr: false }, appType: 'custom' })
 const {
+  Colony,
   actorRosterEntries,
   projectGroups,
   repositoryLandmarkFor,
@@ -343,4 +344,177 @@ test('task buildings and temporary run actors keep separate stable identities', 
       anchor: 'anchor-live',
     },
   ])
+})
+
+test('a visible native task keeps its building, repository Jynx, and current worker together', () => {
+  const thread = {
+    id: 'hermes-kanban:t_live',
+    project: 'bot-crossing',
+    source: 'native-kanban',
+    createdAt: 1,
+    ref: { taskId: 't_live', status: 'running' },
+  }
+  const plot = { id: 'bot-crossing' }
+  const quietPlot = { id: 'quiet' }
+  const buildings = []
+  let roster = []
+  const colony = {
+    plotCells: new Map(),
+    plots: new Map([
+      ['bot-crossing', plot],
+      ['quiet', quietPlot],
+    ]),
+    buildings: new Map(),
+    _syncPlots() {},
+    _syncBuilding(id) {
+      buildings.push(id)
+      return { mesh: { position: { clone: () => 'anchor' } } }
+    },
+    _workSite() {
+      return 'task-site'
+    },
+    _world() {
+      return {}
+    },
+    _rebuildNavigation() {},
+    astronauts: { setRoster(entries) { roster = entries } },
+  }
+
+  Colony.prototype.setThreads.call(colony, [thread], new Set(), [
+    { id: 'p_bot', slug: 'bot-crossing', name: 'Bot Crossing', path: '/work/bot-crossing' },
+    { id: 'p_quiet', slug: 'quiet', name: 'Quiet', path: '/work/quiet' },
+  ], [
+    {
+      id: 'hermes-kanban:actor:t_live:7',
+      taskId: 't_live',
+      runId: 7,
+      profile: 'builder',
+      lifecycleState: 'working',
+      requiresMorgan: false,
+    },
+  ])
+
+  assert.deepEqual(buildings, ['repository:bot-crossing', 'hermes-kanban:t_live', 'repository:quiet'])
+  assert.deepEqual(
+    roster.map(({ id, role, status, site }) => ({ id, role, status, site })),
+    [
+      {
+        id: 'hermes-kanban:actor:t_live:7',
+        role: 'builder',
+        status: 'working',
+        site: 'task-site',
+      },
+      {
+        id: 'repository:bot-crossing:jynx',
+        role: 'jynx',
+        status: 'idle',
+        site: 'task-site',
+      },
+    ]
+  )
+})
+
+test('several repository tasks reuse one Jynx for runless Morgan attention without a stale worker', () => {
+  const working = {
+    id: 'hermes-kanban:t_working',
+    project: 'bot-crossing',
+    ref: { taskId: 't_working', status: 'running' },
+  }
+  const blocked = {
+    id: 'hermes-kanban:t_blocked',
+    project: 'bot-crossing',
+    ref: { taskId: 't_blocked', status: 'blocked' },
+  }
+  const threads = new Map([
+    [working.id, working],
+    [blocked.id, blocked],
+  ])
+  const sites = new Map([
+    [working.id, { site: 'working-site', anchor: 'working-anchor' }],
+    [blocked.id, { site: 'blocked-site', anchor: 'blocked-anchor' }],
+  ])
+  const actors = [
+    {
+      id: 'hermes-kanban:actor:t_working:8',
+      taskId: 't_working',
+      runId: 8,
+      profile: 'reviewer',
+      lifecycleState: 'reviewing',
+      requiresMorgan: false,
+    },
+    {
+      id: 'hermes-kanban:actor:t_blocked:attention',
+      taskId: 't_blocked',
+      runId: null,
+      profile: 'jynx',
+      lifecycleState: 'waiting',
+      requiresMorgan: true,
+    },
+  ]
+  const projects = [{ id: 'bot-crossing', threads: [working, blocked] }]
+
+  const roster = actorRosterEntries(actors, threads, sites, projects)
+
+  assert.deepEqual(
+    roster.map(({ id, role, status, site, stewardSignal }) => ({ id, role, status, site, stewardSignal })),
+    [
+      {
+        id: 'hermes-kanban:actor:t_working:8',
+        role: 'reviewer',
+        status: 'reviewing',
+        site: 'working-site',
+        stewardSignal: false,
+      },
+      {
+        id: 'repository:bot-crossing:jynx',
+        role: 'jynx',
+        status: 'requires-morgan',
+        site: 'blocked-site',
+        stewardSignal: true,
+      },
+    ]
+  )
+  assert.equal(roster.filter(({ role }) => role === 'jynx').length, 1)
+  assert.equal(roster.some(({ role }) => role === 'drone'), false)
+})
+
+test('Morgan attention on a current run signals repository Jynx and still renders its worker', () => {
+  const thread = {
+    id: 'hermes-kanban:t_active_attention',
+    project: 'bot-crossing',
+    ref: { taskId: 't_active_attention', status: 'blocked' },
+  }
+  const actor = {
+    id: 'hermes-kanban:actor:t_active_attention:9',
+    taskId: 't_active_attention',
+    runId: 9,
+    profile: 'drone',
+    lifecycleState: 'waiting',
+    requiresMorgan: true,
+  }
+
+  const roster = actorRosterEntries(
+    [actor],
+    new Map([[thread.id, thread]]),
+    new Map([[thread.id, { site: 'attention-site', anchor: 'attention-anchor' }]]),
+    [{ id: 'bot-crossing', threads: [thread] }]
+  )
+
+  assert.deepEqual(
+    roster.map(({ id, role, status, stewardSignal }) => ({ id, role, status, stewardSignal })),
+    [
+      {
+        id: 'hermes-kanban:actor:t_active_attention:9',
+        role: 'drone',
+        status: 'internal-wait',
+        stewardSignal: false,
+      },
+      {
+        id: 'repository:bot-crossing:jynx',
+        role: 'jynx',
+        status: 'requires-morgan',
+        stewardSignal: true,
+      },
+    ]
+  )
 })

@@ -576,6 +576,57 @@ test('normalizes an active review claim into one stable task-linked reviewing ac
   assert.deepEqual(second, first)
 })
 
+test('projects only Morgan-facing blocked attention after Hermes clears the current run', async () => {
+  const { home, databasePath } = await fixtureHome()
+  process.env.HERMES_HOME = home
+  insertTask(databasePath, {
+    id: 't_morgan_attention',
+    assignee: 'drone',
+    status: 'blocked',
+    block_kind: 'needs_input',
+    current_run_id: null,
+    last_heartbeat_at: 225,
+    session_id: 'former/drone/session',
+  })
+  insertRun(databasePath, {
+    id: 224,
+    task_id: 't_morgan_attention',
+    profile: 'drone',
+    status: 'blocked',
+    started_at: 200,
+    ended_at: 225,
+    last_heartbeat_at: 224,
+  })
+  insertEvent(databasePath, {
+    task_id: 't_morgan_attention',
+    run_id: 224,
+    kind: 'blocked',
+    payload: JSON.stringify({ reason: 'Morgan must decide', kind: 'needs_input' }),
+    created_at: 225,
+  })
+  insertTask(databasePath, { id: 't_todo', status: 'todo' })
+  insertTask(databasePath, { id: 't_dependency', status: 'blocked', block_kind: 'dependency' })
+  insertTask(databasePath, { id: 't_transient', status: 'blocked', block_kind: 'transient' })
+  const adapter = createHermesKanban({ now: () => 300_000 })
+
+  const actors = await adapter.scanActors()
+
+  assert.deepEqual(actors, [
+    {
+      id: 'hermes-kanban:actor:t_morgan_attention:attention',
+      taskId: 't_morgan_attention',
+      runId: null,
+      profile: 'jynx',
+      lifecycleState: 'waiting',
+      heartbeat: { lastAt: 225000, freshness: 'fresh' },
+      requiresMorgan: true,
+      managingSession: { id: '', canOpen: false },
+      steward: 'Jynx',
+    },
+  ])
+  assert.equal(actors.some(({ id, profile }) => id.endsWith(':224') || profile === 'drone'), false)
+})
+
 test('disables actor navigation when active runs share a non-unique managing session', async () => {
   const { home, databasePath } = await fixtureHome()
   process.env.HERMES_HOME = home
