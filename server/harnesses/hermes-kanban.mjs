@@ -333,7 +333,7 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
               LIMIT 1
             ) AS claimed_payload
           FROM tasks t
-          INNER JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id
+          LEFT JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id
           ORDER BY t.id, r.id
         `)
         .all()
@@ -343,29 +343,34 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
 
     const actors = []
     for (const row of rows) {
+      const attention = attentionFor(row.task_status, row.block_kind)
+      const hasCurrentRun = row.run_id !== null
+      if (!hasCurrentRun && !attention.requiresMorgan) continue
       let claimedFromReview = false
       try {
         claimedFromReview = JSON.parse(row.claimed_payload || 'null')?.source_status === 'review'
       } catch {
         // Missing or malformed lifecycle metadata cannot truthfully establish review provenance.
       }
-      const lifecycleState = actorLifecycleState(row.task_status, row.run_status, claimedFromReview)
+      const lifecycleState = hasCurrentRun
+        ? actorLifecycleState(row.task_status, row.run_status, claimedFromReview)
+        : 'waiting'
       if (!lifecycleState) continue
       const taskId = String(row.task_id)
-      const runId = Number(row.run_id)
-      const sessionId = validSessionId(row.session_id) ? row.session_id : ''
+      const runId = hasCurrentRun ? Number(row.run_id) : null
+      const sessionId = hasCurrentRun && validSessionId(row.session_id) ? row.session_id : ''
       const heartbeatAt = Math.max(
         epochMilliseconds(row.run_last_heartbeat_at),
         epochMilliseconds(row.task_last_heartbeat_at)
       )
       actors.push({
-        id: `hermes-kanban:actor:${taskId}:${runId}`,
+        id: `hermes-kanban:actor:${taskId}:${hasCurrentRun ? runId : 'attention'}`,
         taskId,
         runId,
-        profile: String(row.profile || ''),
+        profile: hasCurrentRun ? String(row.profile || '') : 'jynx',
         lifecycleState,
         heartbeat: actorHeartbeat(heartbeatAt, now()),
-        requiresMorgan: attentionFor(row.task_status, row.block_kind).requiresMorgan,
+        requiresMorgan: attention.requiresMorgan,
         managingSession: { id: sessionId, canOpen: Boolean(sessionId) },
         steward: 'Jynx',
       })

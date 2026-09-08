@@ -80,20 +80,41 @@ export function wantsMorganAttention(thread, status) {
   return status === 'waiting' || status === 'blocked'
 }
 
-/** Join temporary current-run actors onto temporary task worksites without inventing actors. */
-export function actorRosterEntries(actors, threads, sites) {
+/** Join one repository steward and temporary current-run actors onto visible task worksites. */
+export function actorRosterEntries(actors, threads, sites, projects = []) {
   const threadByTask = new Map()
   for (const thread of threads.values()) {
     if (thread.ref?.taskId) threadByTask.set(thread.ref.taskId, thread)
   }
   const roster = []
   const seen = new Set()
+  for (const project of projects) {
+    const attention = (actors || []).find(
+      (actor) => actor?.requiresMorgan === true && project.threads.some((thread) => thread.ref?.taskId === actor.taskId)
+    )
+    const thread = (attention && threadByTask.get(attention.taskId)) || project.threads[0]
+    const location = thread && sites.get(thread.id)
+    if (!thread || !location) continue
+    const presentation = attention
+      ? actorPresentation(attention)
+      : { status: 'idle', role: 'jynx', stewardSignal: false }
+    roster.push({
+      id: `repository:${project.id}:jynx`,
+      thread,
+      actor: attention || null,
+      ...presentation,
+      ...location,
+    })
+  }
   for (const actor of actors || []) {
+    if (actor?.requiresMorgan === true && actor.runId === null) continue
     if (!actor?.id || seen.has(actor.id)) continue
     const thread = threadByTask.get(actor.taskId)
     const location = thread && sites.get(thread.id)
     if (!thread || !location) continue
-    const presentation = actorPresentation(actor)
+    const presentation = actorPresentation(
+      actor.requiresMorgan === true ? { ...actor, requiresMorgan: false } : actor
+    )
     roster.push({ id: actor.id, thread, actor, ...presentation, ...location })
     seen.add(actor.id)
   }
@@ -465,7 +486,7 @@ export class Colony {
     }
 
     this.threads = new Map(live.map((t) => [t.id, t]))
-    if (actors !== null) roster.push(...actorRosterEntries(actors, this.threads, actorSites))
+    if (actors !== null) roster.push(...actorRosterEntries(actors, this.threads, actorSites, projects))
     this.urgentPlots = urgent
     this.activePlots = active
     this._rebuildNavigation()
