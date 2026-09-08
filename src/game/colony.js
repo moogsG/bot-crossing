@@ -178,14 +178,14 @@ export function visibleTaskCards(threads, now = Date.now()) {
 }
 
 /**
- * One deterministic landmark per repository. Activity changes only its capped catalogue
- * silhouette: S (0–1) is habitat, M (2–4) is workshop, and L (5+) is tower.
+ * One deterministic landmark per repository. Its Codebase Memory graph tier fixes its
+ * silhouette; task activity changes the surrounding territory and worksites, never this shape.
  */
-export function repositoryLandmarkFor(project, activeCards = project?.threads?.length || 0) {
-  const count = Math.max(0, Number(activeCards) || 0)
+export function repositoryLandmarkFor(project) {
+  const kinds = { small: 'habitat', medium: 'workshop', large: 'tower' }
   return {
     id: `repository:${project.id}`,
-    kind: count >= 5 ? 'tower' : count >= 2 ? 'workshop' : 'habitat',
+    kind: kinds[project?.codebaseSizeTier] || 'habitat',
     project,
   }
 }
@@ -216,12 +216,14 @@ export function projectGroups(threads, catalog = [], archivedIds = new Set(), sa
   const groups = new Map()
   for (const project of knownProjects) {
     if (!project?.slug) continue
-    groups.set(project.slug, {
+    const group = {
       id: project.slug,
       name: project.name || project.slug,
       path: project.path || '',
       threads: [],
-    })
+    }
+    if (project.codebaseSizeTier) group.codebaseSizeTier = project.codebaseSizeTier
+    groups.set(project.slug, group)
   }
 
   // The project endpoint can be unavailable or legitimately empty. In that case the saved
@@ -451,7 +453,7 @@ export class Colony {
       // Oldest thread first, so a given session keeps its slot as siblings come and go.
       list.sort((a, b) => a.createdAt - b.createdAt)
 
-      const landmark = repositoryLandmarkFor(project, list.length)
+      const landmark = repositoryLandmarkFor(project)
       this._syncBuilding(landmark.id, plot, 0, { kind: landmark.kind, type: 'repository' })
       seenBuildings.add(landmark.id)
 
