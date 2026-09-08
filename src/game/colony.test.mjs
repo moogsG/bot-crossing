@@ -204,6 +204,67 @@ test('project groups preserve optional Codebase Memory size tiers from the catal
   assert.equal(Object.hasOwn(groups[1], 'codebaseSizeTier'), false)
 })
 
+test('Codebase Memory size tiers set persistent mixed repository territory floors', () => {
+  const projects = [
+    { id: 'missing', threads: [] },
+    { id: 'invalid', codebaseSizeTier: 'enormous', threads: [] },
+    { id: 'small', codebaseSizeTier: 'small', threads: [] },
+    { id: 'medium', codebaseSizeTier: 'medium', threads: [] },
+    { id: 'large', codebaseSizeTier: 'large', threads: [] },
+  ]
+  const layout = allocateCells(
+    projects.map((project) => ({ id: project.id, size: repositoryPlotDemand(project) }))
+  )
+
+  assert.deepEqual(
+    projects.map(({ id }) => [id, layout.get(id).length]),
+    [
+      ['missing', 1],
+      ['invalid', 1],
+      ['small', 1],
+      ['medium', 2],
+      ['large', 3],
+    ]
+  )
+
+  const occupied = new Set()
+  const neighbours = [
+    [1, 0],
+    [1, -1],
+    [0, -1],
+    [-1, 0],
+    [-1, 1],
+    [0, 1],
+  ]
+  for (const cells of layout.values()) {
+    const reachable = new Set([`${cells[0].q},${cells[0].r}`])
+    while (true) {
+      const before = reachable.size
+      for (const cell of cells) {
+        if (neighbours.some(([dq, dr]) => reachable.has(`${cell.q + dq},${cell.r + dr}`))) {
+          reachable.add(`${cell.q},${cell.r}`)
+        }
+      }
+      if (reachable.size === before) break
+    }
+    assert.equal(reachable.size, cells.length)
+    for (const cell of cells) {
+      const key = `${cell.q},${cell.r}`
+      assert.equal(occupied.has(key), false)
+      assert.notEqual(key, '-2,1')
+      occupied.add(key)
+    }
+  }
+
+  const remembered = layout.get('large')
+  assert.equal(repositoryPlotDemand({ codebaseSizeTier: 'medium', threads: [] }, remembered), 3 * SLOTS_PER_CELL)
+  assert.equal(repositoryPlotDemand({ threads: [] }, remembered), 3 * SLOTS_PER_CELL)
+  assert.equal(
+    repositoryPlotDemand({ codebaseSizeTier: 'small', threads: Array(14).fill({}) }),
+    2 * SLOTS_PER_CELL + 1
+  )
+})
+
 test('native completed worksites remain for exactly the shared grace interval', () => {
   const completedAt = 10_000
   const completed = {
