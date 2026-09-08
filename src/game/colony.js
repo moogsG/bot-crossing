@@ -191,13 +191,15 @@ export function repositoryLandmarkFor(project) {
 }
 
 /**
- * Territory grows when the landmark and visible worksites exhaust the established slots.
+ * Codebase Memory size sets the initial territory floor, while visible worksites can grow it.
  * Remembering whole-cell capacity makes that growth cumulative without persisting task data.
  */
 export function repositoryPlotDemand(project, rememberedCells = []) {
   const visibleDemand = Math.max(1, (project?.threads?.length || 0) + 1)
+  const tierDemand =
+    { medium: SLOTS_PER_CELL + 1, large: 2 * SLOTS_PER_CELL + 1 }[project?.codebaseSizeTier] || 1
   const rememberedCapacity = Array.isArray(rememberedCells) ? rememberedCells.length * SLOTS_PER_CELL : 0
-  return Math.max(visibleDemand, rememberedCapacity)
+  return Math.max(visibleDemand, tierDemand, rememberedCapacity)
 }
 
 /** Recover repository presentation from a saved plot id without turning it into a task. */
