@@ -5,6 +5,7 @@ import {
   actorOpenTarget,
   actorPresentation,
   createActorState,
+  nativeBadgeKeyFor,
   reconcileActorUpdate,
   reconcileActorSnapshot,
   reduceActorBatch,
@@ -162,6 +163,44 @@ test('presentation keeps internal waits quiet and reserves the wave for Jynx att
     role: 'reviewer',
     stewardSignal: false,
   })
+})
+
+test('presentation normalizes only recognized worker profiles', () => {
+  const profiles = [
+    [' Builder ', 'builder'],
+    ['REVIEWER', 'reviewer'],
+    [' drone ', 'drone'],
+    [undefined, 'worker'],
+    ['', 'worker'],
+    ['   ', 'worker'],
+    ['jynx', 'worker'],
+    ['unknown-profile', 'worker'],
+  ]
+
+  assert.deepEqual(
+    profiles.map(([profile]) => actorPresentation(actor({ profile })).role),
+    profiles.map(([, role]) => role)
+  )
+})
+
+test('native active badges identify the normalized worker role', () => {
+  assert.deepEqual(
+    ['builder', 'reviewer', 'drone', 'worker'].map((role) => nativeBadgeKeyFor('working', role)),
+    ['working', 'reviewer', 'drone', 'worker']
+  )
+  assert.deepEqual(
+    ['builder', 'reviewer', 'drone', 'worker'].map((role) => nativeBadgeKeyFor('reviewing', role)),
+    ['working', 'reviewer', 'drone', 'worker']
+  )
+})
+
+test('native urgent and completion badges override role while quiet statuses stay hidden', () => {
+  assert.equal(nativeBadgeKeyFor('requires-morgan', 'reviewer'), 'waiting')
+  assert.equal(nativeBadgeKeyFor('blocked', 'drone'), 'blocked')
+  assert.equal(nativeBadgeKeyFor('celebrating', 'worker'), 'done')
+  assert.equal(nativeBadgeKeyFor('internal-wait', 'builder'), 'none')
+  assert.equal(nativeBadgeKeyFor('idle', 'reviewer'), 'none')
+  assert.equal(nativeBadgeKeyFor('sleeping', 'drone'), 'none')
 })
 
 test('actor navigation uses only the authoritative managing session', () => {

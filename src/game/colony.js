@@ -19,7 +19,7 @@ import { Astronauts } from '../agents/astronauts.js'
 import { Indicators, BADGE } from '../agents/indicators.js'
 import { Particles } from '../agents/particles.js'
 import { Navigation } from '../agents/navigation.js'
-import { actorPresentation, COMPLETION_GRACE_MS } from './actor-lifecycle.js'
+import { actorPresentation, COMPLETION_GRACE_MS, nativeBadgeKeyFor } from './actor-lifecycle.js'
 
 /**
  * The colony: everything that turns a list of agent threads into a place.
@@ -934,6 +934,7 @@ export class Colony {
     // Badges only appear once an astronaut has actually reached its post — a stream of
     // symbols bobbing over a walking crowd is noise.
     if (agent.state !== 'at-site') return BADGE.none
+    if (agent.actor) return BADGE[nativeBadgeKeyFor(agent.status, agent.role)] ?? BADGE.none
     return BADGE_FOR[agent.status] ?? BADGE.none
   }
 

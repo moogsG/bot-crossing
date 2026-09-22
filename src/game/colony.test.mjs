@@ -14,6 +14,7 @@ const {
   wantsMorganAttention,
 } = await vite.ssrLoadModule('/src/game/colony.js')
 const { COMPLETION_GRACE_MS } = await vite.ssrLoadModule('/src/game/actor-lifecycle.js')
+const { BADGE } = await vite.ssrLoadModule('/src/agents/indicators.js')
 const { allocateCells, SLOTS_PER_CELL } = await vite.ssrLoadModule('/src/world/plots.js')
 await vite.close()
 
@@ -781,5 +782,49 @@ test('Morgan attention on a current run signals repository Jynx and still render
         stewardSignal: true,
       },
     ]
+  )
+})
+
+test('native active astronauts receive distinct role badges', () => {
+  const badgeFor = (role, status = 'working') =>
+    Colony.prototype._badgeFor.call({}, { state: 'at-site', actor: {}, role, status })
+
+  assert.deepEqual(
+    ['builder', 'reviewer', 'drone', 'worker'].map((role) => badgeFor(role)),
+    [2, 8, 9, 10]
+  )
+  assert.deepEqual(
+    ['builder', 'reviewer', 'drone', 'worker'].map((role) => badgeFor(role, 'reviewing')),
+    [2, 8, 9, 10]
+  )
+})
+
+test('native urgent and completion badges override role badges', () => {
+  const badgeFor = (status) =>
+    Colony.prototype._badgeFor.call({}, { state: 'at-site', actor: {}, role: 'reviewer', status })
+
+  assert.equal(badgeFor('requires-morgan'), BADGE.waiting)
+  assert.equal(badgeFor('blocked'), BADGE.blocked)
+  assert.equal(badgeFor('celebrating'), BADGE.done)
+  assert.equal(badgeFor('internal-wait'), BADGE.none)
+  assert.equal(badgeFor('idle'), BADGE.none)
+  assert.equal(badgeFor('sleeping'), BADGE.none)
+})
+
+test('transit state and at-site gating override native role badges', () => {
+  const agent = { actor: {}, role: 'drone', status: 'working' }
+
+  assert.equal(Colony.prototype._badgeFor.call({}, { ...agent, state: 'spawning' }), BADGE.spawning)
+  assert.equal(Colony.prototype._badgeFor.call({}, { ...agent, state: 'leaving' }), BADGE.leaving)
+  assert.equal(Colony.prototype._badgeFor.call({}, { ...agent, state: 'walking' }), BADGE.none)
+})
+
+test('legacy astronauts preserve status-only badge behavior', () => {
+  const badgeFor = (status) =>
+    Colony.prototype._badgeFor.call({}, { state: 'at-site', actor: null, role: 'worker', status })
+
+  assert.deepEqual(
+    ['waiting', 'blocked', 'working', 'celebrating', 'reviewing', 'idle', 'sleeping'].map(badgeFor),
+    [BADGE.waiting, BADGE.blocked, BADGE.working, BADGE.done, BADGE.none, BADGE.none, BADGE.none]
   )
 })
