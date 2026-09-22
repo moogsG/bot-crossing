@@ -100,6 +100,23 @@ export function visibleActors(state, now = Date.now()) {
     .sort((a, b) => a.id.localeCompare(b.id))
 }
 
+const WORKER_ROLES = new Set(['builder', 'reviewer', 'drone'])
+
+function normalizedWorkerRole(profile) {
+  const role = String(profile || '').trim().toLowerCase()
+  return WORKER_ROLES.has(role) ? role : 'worker'
+}
+
+export function nativeBadgeKeyFor(status, role) {
+  if (status === 'requires-morgan') return 'waiting'
+  if (status === 'blocked') return 'blocked'
+  if (status === 'celebrating') return 'done'
+  if (status !== 'working' && status !== 'reviewing') return 'none'
+
+  const workerRole = normalizedWorkerRole(role)
+  return workerRole === 'builder' ? 'working' : workerRole
+}
+
 export function actorPresentation(actor) {
   if (actor?.requiresMorgan === true) {
     return { status: 'requires-morgan', role: 'jynx', stewardSignal: true }
@@ -112,7 +129,7 @@ export function actorPresentation(actor) {
         : lifecycle === 'completed'
           ? 'celebrating'
           : lifecycle || 'idle',
-    role: String(actor?.profile || 'builder').toLowerCase(),
+    role: normalizedWorkerRole(actor?.profile),
     stewardSignal: false,
   }
 }
