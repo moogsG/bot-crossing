@@ -1,0 +1,17 @@
+manifest_version: 2
+api_version: 1
+name: bot-crossing
+label: Bot Crossing
+version: 1.0.0
+description: Native Hermes Desktop view of the active profile's Kanban colony.
+author: Bot Crossing contributors
+kind: standalone
+license: MIT
+homepage: https://botcrossing.com
+tags: [desktop, kanban, visualization]
+requires_hermes: ">=0.21.5"
+capabilities: []
+provides_tools: []
+provides_hooks: []
+provides_middleware: []
+requires_env: []
