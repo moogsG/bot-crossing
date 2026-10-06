@@ -14,7 +14,28 @@ const post = (url, payload) =>
     body: JSON.stringify(payload),
   })
 
-export const fetchThreads = () => req('/api/threads')
+export const fetchThreads = () => req('/api/threads?source=native-kanban')
+export const fetchActors = () => req('/api/actors')
+export const fetchActorEvents = (since) => req(`/api/events?since=${encodeURIComponent(since)}`)
+export const fetchProjects = () => req('/api/projects')
+
+export async function fetchActorEventBacklog(since, through, readPage = fetchActorEvents) {
+  let cursor = Math.max(0, Number(since) || 0)
+  const target = Math.max(cursor, Number(through) || 0)
+  const events = []
+
+  while (cursor < target) {
+    const page = await readPage(cursor)
+    const nextCursor = Number(page?.cursor)
+    if (!Number.isInteger(nextCursor) || nextCursor <= cursor) {
+      throw new Error('Lifecycle event recovery stopped before the actor snapshot boundary')
+    }
+    events.push(...(page.events || []))
+    cursor = nextCursor
+  }
+
+  return { cursor, events }
+}
 
 /**
  * The colony file, and the base every later save is measured against.

@@ -59,7 +59,7 @@ const DECK_SKIRT = 0.4
 /** The whole prism: the rim you can see, plus the skirt buried under it. */
 const DECK_HEIGHT = DECK_TOP + DECK_SKIRT
 /** Building slots per cell: one in the middle and six around it. */
-const SLOTS_PER_CELL = 7
+export const SLOTS_PER_CELL = 7
 const MAX_CELLS = 9
 
 /**

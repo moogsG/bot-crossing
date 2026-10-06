@@ -10,6 +10,9 @@ import {
   mdiSleep,
   mdiCreation,
   mdiLogout,
+  mdiClipboardSearch,
+  mdiDrone,
+  mdiTools,
 } from '@mdi/js'
 
 /**
@@ -23,7 +26,7 @@ import {
  */
 
 const COLS = 4
-const ROWS = 2
+const ROWS = 3
 
 /** Where the badge's bottom edge sits: a shade above the crown of the helmet. */
 const HEAD_CLEAR = 1.42
@@ -38,6 +41,9 @@ export const BADGE = {
   sleeping: 5,
   spawning: 6,
   leaving: 7,
+  reviewer: 8,
+  drone: 9,
+  worker: 10,
 }
 
 /** HDR badge tint, tone-mapped with the scene after bloom and depth of field. */
@@ -50,6 +56,9 @@ const BADGE_COLOR = {
   5: [0.9, 1.0, 1.7],
   6: [2.4, 1.4, 0.75],
   7: [1.2, 1.3, 1.35],
+  8: [0.55, 1.45, 2.8],
+  9: [1.75, 1.1, 2.8],
+  10: [0.7, 1.7, 1.85],
 }
 
 /**
@@ -65,6 +74,9 @@ const FADE_BY_BADGE = {
   [BADGE.leaving]: 0.5,
   [BADGE.paused]: 0.6,
   [BADGE.sleeping]: 1,
+  [BADGE.reviewer]: 0.4,
+  [BADGE.drone]: 0.4,
+  [BADGE.worker]: 0.4,
 }
 
 export class Indicators {
@@ -261,7 +273,19 @@ export class Indicators {
  * — the glyph has to carry as a silhouette. Material's set is drawn filled to begin with,
  * one closed path per icon, so there is nothing to stroke and nothing to parse.
  */
-const ICON_PATHS = [mdiHelpCircle, mdiAlert, mdiHammer, mdiCheckBold, mdiPause, mdiSleep, mdiCreation, mdiLogout]
+const ICON_PATHS = [
+  mdiHelpCircle,
+  mdiAlert,
+  mdiHammer,
+  mdiCheckBold,
+  mdiPause,
+  mdiSleep,
+  mdiCreation,
+  mdiLogout,
+  mdiClipboardSearch,
+  mdiDrone,
+  mdiTools,
+]
 
 /**
  * The badge atlas. Red channel = the glyph, green channel = the plate's alpha — packing two
@@ -280,7 +304,7 @@ const ICON_PATHS = [mdiHelpCircle, mdiAlert, mdiHammer, mdiCheckBold, mdiPause, 
  * headroom for a larger display. The old 128 gave it three pixels per texel, which is why the
  * corners came out stepped. The cells are square because the quad is: laying 4x2 cells on a
  * square canvas spent twice as many texels down as across, and only across was ever the limit.
- * 2048x1024 RGBA is 8 MB, which is the entire cost — the mip chain that distance reads from is
+ * 2048x1536 RGBA is 12 MB, which is the entire cost — the mip chain that distance reads from is
  * unchanged, and the shadow's blur is set by a bias on the sampled level, so it stays put too.
  */
 function buildBadgeAtlas(cellSize = 512) {
@@ -370,8 +394,8 @@ function platePath(ctx) {
 }
 
 /**
- * The eight symbols, in atlas order: waiting, blocked, working, done, paused, sleeping,
- * spawning, leaving.
+ * The symbols, in atlas order: waiting, blocked, working, done, paused, sleeping,
+ * spawning, leaving, reviewer inspection, drone, and generic worker tools.
  *
  * Material Design Icons, imported as path data rather than drawn here. Eight symbols that have
  * to look like one family is a type problem — one weight, one optical size, one set of

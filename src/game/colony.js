@@ -20,6 +20,7 @@ import {
   DECK_TOP,
   PLOT_PALETTE,
   PLOT_CELL,
+  SLOTS_PER_CELL,
 } from '../world/plots.js'
 import { translateCells } from '../world/plot-move.js'
 import { createBuilding, buildingUniforms, Scaffolds } from '../world/buildings.js'
@@ -30,6 +31,7 @@ import { MAX_AGENT_CAP } from '../core/settings.js'
 import { Particles } from '../agents/particles.js'
 import { Navigation } from '../agents/navigation.js'
 import { liveThreadsForColony } from './hidden-projects.js'
+import { projectGroups as baseProjectGroups } from './actor-lifecycle.js'
 
 /**
  * The colony: everything that turns a list of agent threads into a place.
@@ -68,6 +70,9 @@ export const STATUS_ORDER = ['blocked', 'waiting', 'working', 'celebrating', 'id
 
 export const STATUS_LABEL = {
   working: 'Working',
+  reviewing: 'Reviewing',
+  'internal-wait': 'Waiting internally',
+  'requires-morgan': 'Jynx needs Morgan',
   waiting: 'Waiting on you',
   blocked: 'Blocked',
   celebrating: 'Shipped',
@@ -79,6 +84,7 @@ export const STATUS_LABEL = {
 
 /** Thread → behaviour. First match wins, exactly like the board's auto-sort. */
 export function statusFor(thread, now = Date.now()) {
+  if (thread?.source === 'native-kanban' && thread.requiresMorgan === true) return 'requires-morgan'
   if (thread.hasError) return 'blocked'
   if (thread.running) return 'working'
   if (thread.prState === 'MERGED') return 'celebrating'
@@ -87,12 +93,191 @@ export function statusFor(thread, now = Date.now()) {
   return 'idle'
 }
 
+/** Native Kanban tasks declare Morgan attention explicitly; older harnesses retain their badges. */
+export function wantsMorganAttention(thread, status) {
+  if (thread?.source === 'native-kanban') return thread.requiresMorgan === true
+  return status === 'waiting' || status === 'blocked'
+}
+
+const WORKER_ROLES = new Set(['builder', 'reviewer', 'drone'])
+const normalizedWorkerRole = (profile) => {
+  const role = String(profile || '').trim().toLowerCase()
+  return WORKER_ROLES.has(role) ? role : 'worker'
+}
+
+const actorPresentation = (actor) => {
+  if (actor?.requiresMorgan === true) {
+    return { status: 'requires-morgan', role: 'jynx', stewardSignal: true }
+  }
+  const lifecycle = actor?.lifecycleState
+  return {
+    status:
+      lifecycle === 'waiting'
+        ? 'internal-wait'
+        : lifecycle === 'completed'
+          ? 'celebrating'
+          : lifecycle || 'idle',
+    role: normalizedWorkerRole(actor?.profile),
+    stewardSignal: false,
+  }
+}
+
+/** Join one repository steward and temporary current-run actors onto visible task worksites. */
+export function actorRosterEntries(actors, threads, sites, projects = []) {
+  const threadByTask = new Map()
+  for (const thread of threads.values()) {
+    if (thread.ref?.taskId) threadByTask.set(thread.ref.taskId, thread)
+  }
+  const roster = []
+  const seen = new Set()
+  for (const project of projects) {
+    const attentionActor = (actors || []).find(
+      (actor) => actor?.requiresMorgan === true && project.threads.some((thread) => thread.ref?.taskId === actor.taskId)
+    )
+    const attentionThread = project.threads.find((thread) => thread.requiresMorgan === true)
+    const thread = (attentionActor && threadByTask.get(attentionActor.taskId)) || attentionThread || project.threads[0]
+    const location = thread && sites.get(thread.id)
+    if (!thread || !location) continue
+    const requiresMorgan = Boolean(attentionActor || attentionThread)
+    roster.push({
+      id: `repository:${project.id}:jynx`,
+      thread,
+      actor: attentionActor || null,
+      ...(requiresMorgan
+        ? { status: 'requires-morgan', role: 'jynx', stewardSignal: true }
+        : { status: 'idle', role: 'jynx', stewardSignal: false }),
+      ...location,
+    })
+  }
+  for (const actor of actors || []) {
+    if (actor?.requiresMorgan === true && actor.runId == null) continue
+    if (!actor?.id || seen.has(actor.id)) continue
+    const thread = threadByTask.get(actor.taskId)
+    const location = thread && sites.get(thread.id)
+    if (!thread || !location) continue
+    const presentation = actorPresentation(actor.requiresMorgan === true ? { ...actor, requiresMorgan: false } : actor)
+    roster.push({ id: actor.id, thread, actor, ...presentation, ...location })
+    seen.add(actor.id)
+  }
+  return roster.sort((a, b) => a.id.localeCompare(b.id))
+}
+
+/** One stable primary landmark per repository; only optional graph size changes its silhouette. */
+export function repositoryLandmarkFor(project) {
+  const kinds = { small: 'habitat', medium: 'workshop', large: 'tower' }
+  return { id: `repository:${project.id}`, kind: kinds[project?.codebaseSizeTier] || 'habitat', project }
+}
+
+const TERRITORY_CELL_FLOORS = { xs: 1, small: 2, medium: 3, large: 5, xl: 7, xxl: 9 }
+const ANNEX_KINDS = ['solar', 'antenna', 'silo', 'greenhouse', 'reactor', 'pad', 'lab', 'habitat']
+const territoryCellFloor = (project) =>
+  TERRITORY_CELL_FLOORS[project?.codebaseTerritoryTier] ||
+  ({ small: 1, medium: 2, large: 3 }[project?.codebaseSizeTier] || 1)
+
+/** Tier-owned annexes occupy cell centers and never imply task activity. */
+export function repositoryBuildingsFor(project) {
+  const landmark = repositoryLandmarkFor(project)
+  const buildings = [{ id: landmark.id, kind: landmark.kind, type: 'repository', slot: 0 }]
+  const floor = TERRITORY_CELL_FLOORS[project?.codebaseTerritoryTier]
+  for (let index = 1; index < (floor || 1); index += 1) {
+    buildings.push({
+      id: `${landmark.id}:annex:${index}`,
+      kind: ANNEX_KINDS[index - 1],
+      type: 'repository-annex',
+      slot: index * SLOTS_PER_CELL,
+    })
+  }
+  return buildings
+}
+
+/** Keep remembered task positions stable unless campus growth has claimed them or no physical lane remains. */
+export function assignTaskSlots(threads, slotOf, reservedSlots, slotCount = Infinity, occupiedSlots = new Set()) {
+  const visibleIds = new Set(threads.map(({ id }) => id))
+  const taken = new Set()
+  for (const [id, slot] of slotOf) {
+    if (!visibleIds.has(id) || slot < 0 || slot >= slotCount || reservedSlots.has(slot) || taken.has(slot)) slotOf.delete(id)
+    else taken.add(slot)
+  }
+  for (const thread of threads) {
+    if (slotOf.has(thread.id)) continue
+    let slot = 0
+    while (slot < slotCount && (taken.has(slot) || reservedSlots.has(slot) || occupiedSlots.has(slot))) slot++
+    if (slot >= slotCount) continue
+    taken.add(slot)
+    slotOf.set(thread.id, slot)
+  }
+  return slotOf
+}
+
+/** Territory grows for visible worksites and never shrinks below remembered whole-cell capacity. */
+export function repositoryPlotDemand(project, rememberedCells = []) {
+  const rememberedCount = Array.isArray(rememberedCells) ? rememberedCells.length : 0
+  const visibleDemand = (project?.threads?.length || 0) + repositoryBuildingsFor(project).length
+  const tierDemand = (territoryCellFloor(project) - 1) * SLOTS_PER_CELL + 1
+  const rememberedCapacity = rememberedCount * SLOTS_PER_CELL
+  return Math.max(visibleDemand, tierDemand, rememberedCapacity)
+}
+
+const normalizedPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
+const savedProjectFor = (value) => {
+  const id = String(value || '')
+  let projectPath = ''
+  if (id.startsWith('git:')) projectPath = id.slice(4).replace(/\/\.git$/, '')
+  else if (id.startsWith('workspace:')) projectPath = id.slice('workspace:'.length)
+  const name = normalizedPath(projectPath).split('/').at(-1) || id
+  return id ? { id, name, path: projectPath, threads: [] } : null
+}
+
+/** Preserve enrichment and recover saved repository plots when the live catalog is unavailable. */
+export function projectGroups(threads, catalog = [], archivedIds = new Set(), savedPlots = new Map()) {
+  const groups = new Map(baseProjectGroups(threads, catalog, archivedIds).map((group) => [group.id, group]))
+  for (const project of Array.isArray(catalog) ? catalog : []) {
+    const group = groups.get(project?.slug)
+    if (!group) continue
+    if (project.codebaseSizeTier) group.codebaseSizeTier = project.codebaseSizeTier
+    if (project.codebaseTerritoryTier) group.codebaseTerritoryTier = project.codebaseTerritoryTier
+  }
+  if (!(Array.isArray(catalog) && catalog.length)) {
+    const savedIds = savedPlots instanceof Map ? savedPlots.keys() : Object.keys(savedPlots || {})
+    for (const savedId of savedIds) {
+      const project = savedProjectFor(savedId)
+      if (project && !groups.has(project.id)) groups.set(project.id, project)
+    }
+  }
+  return [...groups.values()]
+}
+
+/** Keep durable repository identity separate from the human name displayed on its territory. */
+export function plotPresentationFor(project) {
+  return {
+    id: project.id,
+    name: project.name || project.id,
+    path: project.path || '',
+  }
+}
+
+/** Legend counts are the colony's canonical visible worksites, never raw adapter labels. */
+export function projectLegendEntries(plots, threads, urgentPlots = new Set()) {
+  return plots
+    .map((plot) => ({
+      id: plot.id,
+      name: plot.name,
+      accent: plot.accent,
+      count: [...threads.values()].filter((thread) => thread.project === plot.id).length,
+      urgent: urgentPlots.has(plot.id),
+    }))
+    .sort((a, b) => b.count - a.count)
+}
+
 /**
  * Which behaviours earn a badge. Dormant and idle deliberately get none: their pose and
  * face already say it, and with most of a real thread list sitting quiet, a badge over
  * every one of them buries the single `?` that actually wants you.
  */
 const BADGE_FOR = {
+  'requires-morgan': BADGE.waiting,
+  'internal-wait': BADGE.none,
+  reviewing: BADGE.none,
   waiting: BADGE.waiting,
   blocked: BADGE.blocked,
   working: BADGE.working,
@@ -474,17 +659,21 @@ export class Colony {
    * ids — repo name for plots, session id for buildings — so a poll that changes nothing
    * moves nothing on screen.
    */
-  setThreads(threads, archivedIds = new Set(), hiddenProjects = new Set(), knownIds = new Set()) {
+  setThreads(
+    threads,
+    archivedIds = new Set(),
+    hiddenProjects = new Set(),
+    knownIds = new Set(),
+    catalog = [],
+    actors = null
+  ) {
     const now = Date.now()
     const live = liveThreadsForColony(threads, archivedIds, hiddenProjects)
 
-    // Group by repo, biggest project first so the busiest work lands nearest the middle.
-    const byProject = new Map()
-    for (const thread of live) {
-      const key = thread.project || 'unknown'
-      if (!byProject.has(key)) byProject.set(key, [])
-      byProject.get(key).push(thread)
-    }
+    // Stable repositories come from the catalog; visible tasks only add temporary worksites.
+    const byProject = new Map(
+      projectGroups(live, catalog, archivedIds, this.plotCells).map((group) => [group.id, group])
+    )
     /**
      * Repos where nothing has stirred in days, folded away on request.
      *
@@ -499,8 +688,9 @@ export class Colony {
      */
     const dormant = new Set()
     if (this.settings.get('hideDormant')) {
-      for (const [name, list] of byProject) {
-        if (list.every((t) => statusFor(t, now) === 'sleeping')) dormant.add(name)
+      for (const [name, project] of byProject) {
+        const list = project.threads
+        if (list.length && list.every((t) => statusFor(t, now) === 'sleeping')) dormant.add(name)
       }
       // Never fold away everything: a colony that answers a poll with an empty planet reads as
       // broken rather than tidy, and there is nothing on screen to tell you which it was.
@@ -509,9 +699,9 @@ export class Colony {
     }
     this.dormantProjects = dormant
 
-    const projects = [...byProject.entries()].sort((a, b) => {
-      if (b[1].length !== a[1].length) return b[1].length - a[1].length
-      return a[0].localeCompare(b[0])
+    const projects = [...byProject.values()].sort((a, b) => {
+      if (b.threads.length !== a.threads.length) return b.threads.length - a.threads.length
+      return a.id.localeCompare(b.id)
     })
 
     this._syncPlots(projects)
@@ -528,6 +718,7 @@ export class Colony {
     }
 
     const roster = []
+    const actorSites = new Map()
     const seenBuildings = new Set()
     const stats = { agents: 0, projects: projects.length }
     for (const key of STATUS_ORDER) stats[key] = 0
@@ -538,8 +729,9 @@ export class Colony {
     // only show it on hover.
     const active = new Set()
 
-    for (const [name, list] of projects) {
-      const plot = this.plots.get(name)
+    for (const project of projects) {
+      const list = project.threads
+      const plot = this.plots.get(project.id)
       if (!plot) continue
       // Oldest thread first, so the *first* assignment of slots is deterministic; after that a
       // thread keeps the slot it was given for as long as the plot stands. Numbering by
@@ -547,39 +739,51 @@ export class Colony {
       // younger sibling one slot along — every building on the plot moved and every
       // astronaut walked, for a thread that had left.
       list.sort((a, b) => a.createdAt - b.createdAt)
-      const slotOf = plot.slotOf || (plot.slotOf = new Map())
-      for (const id of [...slotOf.keys()]) if (!list.some((t) => t.id === id)) slotOf.delete(id)
-      const taken = new Set(slotOf.values())
-      for (const thread of list) {
-        if (slotOf.has(thread.id)) continue
-        let slot = 0
-        while (taken.has(slot)) slot++
-        taken.add(slot)
-        slotOf.set(thread.id, slot)
+      const repositoryBuildings = repositoryBuildingsFor(project)
+      const reservedSlots = new Set(repositoryBuildings.map(({ slot }) => slot))
+      for (const building of repositoryBuildings) {
+        this._syncBuilding(building.id, plot, building.slot, { kind: building.kind, type: building.type })
+        seenBuildings.add(building.id)
       }
+
+      const slotOf = plot.slotOf || (plot.slotOf = new Map())
+      // A vacating mesh remains visible while it sinks. Its logical assignment may be gone,
+      // but its physical lane is not free until disposal, so do not put overflow into it yet.
+      const visibleTaskIds = new Set(list.map(({ id }) => id))
+      const occupiedSlots = new Set()
+      for (const [id, entry] of this.buildings) {
+        if (entry.type === 'task' && entry.plot === plot.id && !visibleTaskIds.has(id)) occupiedSlots.add(entry.slot)
+      }
+      assignTaskSlots(list, slotOf, reservedSlots, plot.slots.length, occupiedSlots)
+      plot.overflowTaskIds = new Set(list.filter((thread) => !slotOf.has(thread.id)).map((thread) => thread.id))
 
       list.forEach((thread) => {
         const i = slotOf.get(thread.id)
         const status = statusFor(thread, now)
         if (stats[status] !== undefined) stats[status]++
-        if (status === 'waiting' || status === 'blocked') urgent.add(plot.id)
-        if (status === 'waiting' || status === 'blocked' || status === 'working') active.add(plot.id)
+        const needsMorgan = wantsMorganAttention(thread, status)
+        if (needsMorgan) urgent.add(plot.id)
+        else if (status === 'waiting' || status === 'blocked' || status === 'working') active.add(plot.id)
         stats.agents++
+        // Overflow remains canonical task data, but has no physical site until a safe lane frees.
+        if (i === undefined) return
 
-        const building = this._syncBuilding(thread, plot, i)
+        const building = this._syncBuilding(thread.id, plot, i, { type: 'task' })
         seenBuildings.add(thread.id)
 
-        roster.push({
-          id: thread.id,
-          thread,
-          status,
+        const location = {
           site: null, // assigned after all buildings have reached the navigation map
           // Where the work actually is. A working astronaut circles it rather than standing
           // at one spot, so it needs the building, not just a place to stand near it.
           anchor: building.mesh.position.clone(),
           // Already on the colony's books, so it does not need an entrance.
           known: knownIds.has(thread.id),
-        })
+        }
+        actorSites.set(thread.id, location)
+        // Native Kanban has an explicit current-run actor stream; a task is only a worksite.
+        if (actors === null || thread.source !== 'native-kanban') {
+          roster.push({ id: thread.id, thread, status, ...location })
+        }
       })
     }
 
@@ -589,17 +793,33 @@ export class Colony {
       if (!seenBuildings.has(id)) this._removeBuilding(id, entry)
     }
 
-    this.threads = new Map(live.map((t) => [t.id, t]))
+    this.threads = new Map(projects.flatMap((project) => project.threads).map((t) => [t.id, t]))
     this.urgentPlots = urgent
     this.activePlots = active
     this._rebuildNavigation()
+    for (const [threadId, location] of actorSites) {
+      const entry = this.buildings.get(threadId)
+      if (!entry) continue
+      location.site = this._workSite(this.plots.get(entry.plot), entry, entry.slot)
+    }
     for (const member of roster) {
-      const entry = this.buildings.get(member.id)
+      const entry = this.buildings.get(member.thread.id)
+      if (!entry) continue
       member.site = this._workSite(this.plots.get(entry.plot), entry, entry.slot)
     }
+    if (actors !== null) roster.push(...actorRosterEntries(actors, this.threads, actorSites, projects))
     this._syncFaunaSites()
     this.stats = { ...stats, done: stats.celebrating }
     this.astronauts.setRoster(roster, this._world())
+    // Preserve role/state metadata without changing the upstream motion implementation.
+    const byId = new Map(roster.map((entry) => [entry.id, entry]))
+    for (const agent of this.astronauts.agents) {
+      const entry = byId.get(agent.id)
+      if (!entry) continue
+      agent.actor = entry.actor || null
+      agent.role = entry.role || 'worker'
+      agent.stewardSignal = entry.stewardSignal === true
+    }
     return this.stats
   }
 
@@ -608,7 +828,10 @@ export class Colony {
     // — never because a different repo gained or lost a thread. `plotCells` carries it
     // between polls, and the colony file carries it between sessions.
     const layout = allocateCells(
-      projects.map(([name, list]) => ({ id: name, size: list.length })),
+      projects.map((project) => ({
+        id: project.id,
+        size: repositoryPlotDemand(project, this.plotCells.get(project.id)),
+      })),
       this.plotCells
     )
     // Remembered, not replaced: a project that has just lost its last thread keeps its
@@ -636,17 +859,19 @@ export class Colony {
       this.plots.delete(name)
     }
 
-    projects.forEach(([name], index) => {
-      if (this.plots.has(name)) return
-      const cells = layout.get(name)
+    projects.forEach((project, index) => {
+      const presentation = plotPresentationFor(project)
+      const id = presentation.id
+      if (this.plots.has(id)) return
+      const cells = layout.get(id)
       if (!cells?.length) return
-      const accent = this._pickAccent(name)
-      const plot = new Plot({ id: name, name, index, cells, accent })
-      plot.signature = wanted.get(name)
-      this.plots.set(name, plot)
+      const accent = this._pickAccent(id)
+      const plot = new Plot({ id, name: presentation.name, index, cells, accent })
+      plot.signature = wanted.get(id)
+      this.plots.set(id, plot)
       this.plotGroup.add(plot.group)
 
-      const label = createLabel(name, accent)
+      const label = createLabel(presentation.name, accent)
       label.position.set(plot.labelAnchor.x, 3.2, plot.labelAnchor.z)
       plot.label = label
       this.labelGroup.add(label)
@@ -715,21 +940,27 @@ export class Colony {
     return PLOT_PALETTE[start]
   }
 
-  _syncBuilding(thread, plot, index) {
-    let entry = this.buildings.get(thread.id)
+  _syncBuilding(id, plot, index, { kind = null, type = 'task' } = {}) {
+    let entry = this.buildings.get(id)
     // Whole, always. A building that has finished rising is a building you can see all of.
     const target = 1
 
+    if (entry && entry.kind !== kind) {
+      this._disposeBuilding(id, entry)
+      entry = null
+    }
+
     if (!entry) {
-      const mesh = createBuilding({ seed: hashString(thread.id), accent: plot.accent })
+      const mesh = createBuilding({ seed: hashString(id), accent: plot.accent, kind })
       const pos = plot.worldSlot(index)
       mesh.position.copy(pos)
-      mesh.rotation.y = ((hashString(thread.id) >>> 8) % 360) * (Math.PI / 180)
+      mesh.rotation.y = ((hashString(id) >>> 8) % 360) * (Math.PI / 180)
       // New buildings rise from nothing rather than appearing whole.
       mesh.userData.setProgress(0)
+      mesh.userData.buildingId = id
       this.worldGroup.add(mesh)
-      entry = { mesh, plot: plot.id, slot: index, progress: 0, target, retiring: false }
-      this.buildings.set(thread.id, entry)
+      entry = { mesh, plot: plot.id, slot: index, progress: 0, target, retiring: false, kind, type }
+      this.buildings.set(id, entry)
     } else {
       // Where this building belongs *now*. Comparing the world position rather than the
       // plot id and slot number is what catches a zone that was rebuilt underneath it: the
@@ -754,13 +985,15 @@ export class Colony {
     // reads as a glitch, one that sinks reads as being packed up.
     entry.retiring = true
     entry.target = 0
-    if (entry.progress <= 0.02) {
-      this.worldGroup.remove(entry.mesh)
-      entry.mesh.geometry.dispose()
-      entry.mesh.material.dispose()
-      entry.mesh.customDepthMaterial?.dispose()
-      this.buildings.delete(id)
-    }
+    if (entry.progress <= 0.02) this._disposeBuilding(id, entry)
+  }
+
+  _disposeBuilding(id, entry) {
+    this.worldGroup.remove(entry.mesh)
+    entry.mesh.geometry.dispose()
+    entry.mesh.material.dispose()
+    entry.mesh.customDepthMaterial?.dispose()
+    this.buildings.delete(id)
   }
 
   /**
@@ -1095,6 +1328,14 @@ export class Colony {
   _badgeFor(agent) {
     if (agent.state === 'spawning') return BADGE.spawning
     if (agent.state === 'leaving') return BADGE.leaving
+    if (agent.actor) {
+      if (agent.status === 'requires-morgan') return BADGE.waiting
+      if (agent.status === 'blocked') return BADGE.blocked
+      if (agent.status === 'celebrating') return BADGE.done
+      if (agent.status !== 'working' && agent.status !== 'reviewing') return BADGE.none
+      const role = normalizedWorkerRole(agent.role)
+      return role === 'builder' ? BADGE.working : BADGE[role]
+    }
     // A badge belongs to the *thread*, not to the spot: an astronaut that has to walk —
     // shoved off its mark by a neighbour, re-routed round a new building — is still the one
     // waiting on you, and the symbol that says so must not blink out for the trip.

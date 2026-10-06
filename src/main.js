@@ -3,7 +3,14 @@ import './ui/styles.css'
 import { DEFAULT_PRESET, Settings, hasStoredSettings } from './core/settings.js'
 import { Engine } from './core/engine.js'
 import { CameraRig } from './core/camera.js'
-import { Colony, STATUS_LABEL, STATUS_ORDER, statusFor, transcriptProgress } from './game/colony.js'
+import {
+  Colony,
+  STATUS_LABEL,
+  STATUS_ORDER,
+  projectLegendEntries,
+  statusFor,
+  transcriptProgress,
+} from './game/colony.js'
 import { Hud } from './ui/hud.js'
 import { PLANETS } from './world/planet.js'
 import { DECK_TOP, PLOT_CELL, hexToWorld, worldToHex } from './world/plots.js'
@@ -17,6 +24,10 @@ import { shorelinePoints } from './world/planet.js'
 import { shipPosition } from './world/plots.js'
 import {
   fetchThreads,
+  fetchActors,
+  fetchActorEvents,
+  fetchActorEventBacklog,
+  fetchProjects,
   fetchState,
   saveState,
   openThread,
@@ -25,6 +36,13 @@ import {
 } from './game/api.js'
 import { hideProject, hiddenCatalog, unhideProject } from './game/hidden-projects.js'
 import { withErrands } from './game/errands.js'
+import {
+  createActorState,
+  reconcileActorSnapshot,
+  reconcileActorUpdate,
+  reduceActorBatch,
+  visibleActors,
+} from './game/actor-lifecycle.js'
 
 /**
  * Boot and the outer game loop.
@@ -36,13 +54,14 @@ import { withErrands } from './game/errands.js'
  */
 
 const POLL_MS = 15000
+const EVENT_POLL_MS = 600
 const app = document.getElementById('app')
 
 app.insertAdjacentHTML(
   'beforeend',
   `<div class="boot"><div class="inner">
      <h1>Bot Crossing</h1>
-     <p>Scanning for agent threads…</p>
+     <p>Loading native Hermes Kanban cards and workers…</p>
      <div class="bar"><i></i></div>
    </div></div>`
 )
@@ -63,6 +82,8 @@ const colony = new Colony(engine.scene, settings, engine.camera, engine.renderer
 
 let state = { archived: [], archivedAt: {}, opened: [], plots: {}, seen: {}, hiddenProjects: [], viewedAt: {} }
 let threads = []
+let projects = []
+let actorState = createActorState()
 /** Last legend built for the bottom bar, kept so the open zone's chip can light up between polls. */
 let legendProjects = []
 /** The zone layout as last written to the colony file, so an unchanged map is not re-saved. */
@@ -420,7 +441,7 @@ function syncProject() {
   }
   const now = Date.now()
   const list = [...colony.threads.values()]
-    .filter((thread) => thread.project === plot.name)
+    .filter((thread) => thread.project === plot.id)
     .map((thread) => ({
       id: thread.id,
       title: thread.title,
@@ -438,7 +459,7 @@ function syncProject() {
   hud.setProject({
     name: plot.name,
     accent: plot.accent,
-    path: pathForProject(plot.name),
+    path: pathForProject(plot.id),
     threads: list,
     selectedId,
   })
@@ -660,7 +681,7 @@ function liftPlot() {
   drag.candidate = null
   if (!plot) return // a poll rebuilt it out from under the hold — rare, and a lift of nothing
   drag.lifted = true
-  drag.name = plot.name
+  drag.name = plot.id
   drag.cells = plot.cells
   // The drag is relative to the cell the press landed on, not to the zone's root: snapping
   // the root under a cursor that grabbed the far corner would jump the zone half its own
@@ -715,7 +736,7 @@ engine.canvas.addEventListener('pointerdown', (e) => {
   if (colony.pick(p.x, p.y, p.aspect)) return // a press on an astronaut is a selection
   const plot = plotUnder(e, p)
   if (!plot) return
-  drag.candidate = plot.name
+  drag.candidate = plot.id
   drag.startX = e.clientX
   drag.startY = e.clientY
   drag.timer = setTimeout(liftPlot, HOLD_MS)
@@ -775,7 +796,7 @@ engine.canvas.addEventListener('pointerup', (e) => {
   // opens that repo's sidebar, and bare ground closes that too.
   if (selectedId) select(null, {})
   const plot = plotUnder(e, p)
-  if (plot) selectProject(plot.name, {})
+  if (plot) selectProject(plot.id, {})
   else actions.closeProject()
 })
 
@@ -900,7 +921,7 @@ window.addEventListener('keydown', (e) => {
 
 // ── data ──────────────────────────────────────────────────────────────────────────────
 
-function applyThreads(list) {
+function applyThreads(list, actorResult = null, actorEvents = null) {
   // Parked while a plot is in hand. `allocateCells` would leave the carried zone's cells
   // alone, but a sibling that grew a thread still rebuilds — and any rebuild pass disposes
   // whichever plots changed, which mid-carry means the lifted group can be torn down under
@@ -919,6 +940,15 @@ function applyThreads(list) {
     return at && t.lastActivityAt <= at ? { ...t, unread: false } : t
   })
   list = threads
+  if (actorResult) {
+    const options = {
+      taskIds: new Set(list.map((thread) => thread.ref?.taskId).filter(Boolean)),
+      now: Date.now(),
+    }
+    actorState = actorEvents
+      ? reconcileActorUpdate(actorState, actorResult, actorEvents, options)
+      : reconcileActorSnapshot(actorState, actorResult.actors || [], { ...options, cursor: actorResult.cursor })
+  }
   const archivedSet = new Set(state.archived)
   const hiddenSet = new Set(state.hiddenProjects || [])
 
@@ -935,18 +965,11 @@ function applyThreads(list) {
   }
   if (firstSeen) queueSave()
 
-  const stats = colony.setThreads(list, archivedSet, hiddenSet, known)
+  const stats = colony.setThreads(list, archivedSet, hiddenSet, known, projects, visibleActors(actorState))
   hud.setStats(stats)
   chimeForNewWaiting(list, archivedSet, hiddenSet)
 
-  legendProjects = colony.plotOrder
-    .map((plot) => ({
-      name: plot.name,
-      accent: plot.accent,
-      count: list.filter((t) => !t.archived && !archivedSet.has(t.id) && t.project === plot.name).length,
-      urgent: colony.urgentPlots?.has(plot.id) ?? false,
-    }))
-    .sort((a, b) => b.count - a.count)
+  legendProjects = projectLegendEntries(colony.plotOrder, colony.threads, colony.urgentPlots)
 
   // Keep the card honest if the thread it is showing changed underneath it.
   if (selectedId) {
@@ -1001,14 +1024,43 @@ async function poll() {
   if (polling) return
   polling = true
   try {
-    const res = await fetchThreads()
-    applyThreads(res.threads || [])
+    const [res, actorResult, projectResult] = await Promise.all([
+      fetchThreads(),
+      fetchActors(),
+      fetchProjects().catch(() => ({ projects })),
+    ])
+    const actorEvents = await fetchActorEventBacklog(actorResult.cursor, actorResult.through)
+    projects = projectResult.projects || []
+    applyThreads(res.threads || [], actorResult, actorEvents)
     hud.removeBoot()
   } catch (err) {
     hud.toast(err.message || 'Could not reach the thread scanner', 'err')
     hud.removeBoot()
   } finally {
     polling = false
+  }
+}
+
+let eventTimer = 0
+let eventFailures = 0
+async function pollEvents() {
+  clearTimeout(eventTimer)
+  try {
+    const now = Date.now()
+    const batch = await fetchActorEvents(actorState.cursor)
+    actorState = reduceActorBatch(actorState, batch.events || [], { now })
+    if (Number(batch.cursor) < actorState.cursor) actorState.needsReconcile = true
+    else actorState.cursor = Math.max(actorState.cursor, Number(batch.cursor) || 0)
+    eventFailures = 0
+    if (batch.events?.length || actorState.celebrations.size) applyThreads(threads)
+    const celebrationEnded = [...actorState.celebrations.values()].some((until) => until <= now)
+    if (actorState.needsReconcile || celebrationEnded) await poll()
+  } catch {
+    eventFailures++
+    if (eventFailures === 1) await poll()
+  } finally {
+    const delay = eventFailures ? Math.min(30000, EVENT_POLL_MS * 2 ** Math.min(eventFailures, 6)) : EVENT_POLL_MS
+    eventTimer = setTimeout(pollEvents, delay)
   }
 }
 
@@ -1060,6 +1112,7 @@ async function boot() {
   if (!kitError) colony.onAssetsReady()
 
   await poll()
+  pollEvents()
   setInterval(poll, POLL_MS)
   window.addEventListener('focus', poll)
   // A tab that was hidden for an hour should catch up the moment it comes back.

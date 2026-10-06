@@ -126,6 +126,10 @@ export class CameraRig {
   _pointerDown(e) {
     if (!this.enabled) return
     this._pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    // Keep the gesture owned by the canvas even when it crosses a HUD panel. Window-level
+    // move/up listeners are a fallback for older browsers, but capture also covers embedded
+    // hosts whose overlay stops propagation before an event reaches window.
+    this.dom.setPointerCapture?.(e.pointerId)
     this._moved = 0
     this._zoom = null
 
@@ -216,6 +220,7 @@ export class CameraRig {
   }
 
   _pointerUp(e) {
+    if (this.dom.hasPointerCapture?.(e.pointerId)) this.dom.releasePointerCapture(e.pointerId)
     this._pointers.delete(e.pointerId)
     if (this._pointers.size === 0) {
       this._mode = null

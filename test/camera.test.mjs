@@ -21,6 +21,41 @@ function fixture(values = {}) {
 const event = (x, y, extra = {}) => ({ pointerId: 1, clientX: x, clientY: y, button: 0, preventDefault() {}, ...extra })
 const near = (a, b, message) => assert.ok(a.distanceTo(b) < 1e-7, message || `${a.toArray()} != ${b.toArray()}`)
 
+test('a canvas drag captures its pointer until release so HUD boundaries cannot steal it', () => {
+  const oldWindow = globalThis.window
+  const listeners = new Map()
+  const windowTarget = {
+    addEventListener(type, fn) { listeners.set(type, fn) },
+    removeEventListener() {},
+  }
+  const captured = new Set()
+  const dom = {
+    style: {},
+    addEventListener(type, fn) { listeners.set(`canvas:${type}`, fn) },
+    removeEventListener() {},
+    setPointerCapture(id) { captured.add(id) },
+    releasePointerCapture(id) { captured.delete(id) },
+    hasPointerCapture(id) { return captured.has(id) },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 600 }),
+  }
+  globalThis.window = windowTarget
+  try {
+    const camera = new THREE.PerspectiveCamera(38, 1.5, 0.5, 900)
+    const rig = new CameraRig(camera, dom, { get: () => false })
+    listeners.get('canvas:pointerdown')(event(450, 300, { pointerId: 7 }))
+    assert.equal(captured.has(7), true)
+    listeners.get('pointermove')(event(600, 340, { pointerId: 7 }))
+    assert.ok(rig.target.length() > 0, 'a captured drag still pans after crossing an overlay')
+    listeners.get('pointerup')(event(600, 340, { pointerId: 7 }))
+    assert.equal(captured.has(7), false)
+    assert.equal(rig.interacting, false)
+    rig.dispose()
+  } finally {
+    if (oldWindow === undefined) delete globalThis.window
+    else globalThis.window = oldWindow
+  }
+})
+
 test('following tracks position and elevation without changing zoom or chosen orbit', () => {
   const { rig, agent, step } = fixture({ autoFrame: true })
   rig.azimuth = rig.desiredAzimuth = 0.2

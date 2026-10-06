@@ -75,3 +75,40 @@ test('a newly enabled composer gets sized even when the canvas already has that 
   engine._resizeBuffers()
   assert.deepEqual(calls, [['composer', 640, 400]])
 })
+
+test('adaptive quality reacts to sustained frames outside the 20ms performance budget', () => {
+  const oldWindow = globalThis.window
+  globalThis.window = { devicePixelRatio: 1 }
+  try {
+    const { engine } = fixture()
+    engine.perf = { fps: 47 }
+    for (let i = 0; i < 3; i++) {
+      engine._lastGovern = -Infinity
+      engine._governQuality()
+    }
+    assert.equal(engine.viewport.scale, 0.85)
+    assert.equal(engine._resizePending, true)
+  } finally {
+    if (oldWindow === undefined) delete globalThis.window
+    else globalThis.window = oldWindow
+  }
+})
+
+test('adaptive quality reacts to repeated tail-latency failures even when average fps is high', () => {
+  const oldWindow = globalThis.window
+  globalThis.window = { devicePixelRatio: 2 }
+  try {
+    const { engine } = fixture()
+    engine.viewport.scale = 2
+    engine.perf = { fps: 60, windowP95: 25, windowP99: 45, windowMax: 120 }
+    for (let i = 0; i < 3; i++) {
+      engine._lastGovern = -Infinity
+      engine._governQuality()
+    }
+    assert.equal(engine.viewport.scale, 1.7)
+    assert.equal(engine._resizePending, true)
+  } finally {
+    if (oldWindow === undefined) delete globalThis.window
+    else globalThis.window = oldWindow
+  }
+})

@@ -507,7 +507,7 @@ export class Hud {
    */
   setLegend(projects, activeName = null, hidden = [], folded = []) {
     const signature =
-      projects.map((p) => `${p.name}:${p.count}:${p.accent}:${p.urgent ? 1 : 0}`).join('|') +
+      projects.map((p) => `${p.id}:${p.name}:${p.count}:${p.accent}:${p.urgent ? 1 : 0}`).join('|') +
       `~${activeName}~` +
       hidden.map((p) => `${p.name}:${p.count}`).join('|') +
       `~${folded.length}`
@@ -520,14 +520,16 @@ export class Hud {
       const b = document.createElement('button')
       b.type = 'button'
       b.className = 'repo'
-      b.title = `${p.count} thread${p.count === 1 ? '' : 's'} in ${p.name}`
-      b.setAttribute('aria-pressed', String(p.name === activeName))
+      b.title = p.urgent
+        ? `Morgan attention required in ${p.name}`
+        : `${p.count} thread${p.count === 1 ? '' : 's'} in ${p.name}`
+      b.setAttribute('aria-pressed', String(p.id === activeName))
       b.innerHTML =
         `<i class="swatch" style="background:${hex(p.accent)};color:${hex(p.accent)}"></i>` +
         `<span class="n">${escapeHtml(p.name)}</span>` +
-        (p.urgent ? '<i class="alarm"></i>' : '') +
+        (p.urgent ? '<i class="alarm" aria-label="Morgan attention required"></i>' : '') +
         `<span class="count">${p.count}</span>`
-      b.addEventListener('click', () => this.actions.pickProject?.(p.name))
+      b.addEventListener('click', () => this.actions.pickProject?.(p.id))
       wrap.appendChild(b)
     }
     this.$('.sec-head span').textContent = `${projects.length} repo${projects.length === 1 ? '' : 's'}`
@@ -618,7 +620,7 @@ export class Hud {
     // nothing is happening keeps whatever "4m ago" it was first drawn with, for as long as
     // you leave the panel open.
     const signature =
-      `${project.name}~${project.path}~${project.accent}~${project.selectedId}~${Math.floor(Date.now() / 60000)}~` +
+      `${project.name}~${project.path}~${project.accent}~${project.selectedId}~${morganAttentionCount(project.threads)}~${Math.floor(Date.now() / 60000)}~` +
       project.threads.map((t) => `${t.id}:${t.status}:${t.title}:${t.lastActivityAt}`).join('|')
     panel.classList.add('drilled')
     if (this._last.project === signature) return
@@ -637,7 +639,7 @@ export class Hud {
     this.$('#btn-copy-path').disabled = !project.path
 
     const n = project.threads.length
-    const waiting = project.threads.filter((t) => t.status === 'waiting' || t.status === 'blocked').length
+    const waiting = morganAttentionCount(project.threads)
     this.$('.side .threads-head').innerHTML =
       `<span>${n} thread${n === 1 ? '' : 's'}</span>` + (waiting ? `<span class="want">${waiting} need you</span>` : '')
 
@@ -925,7 +927,10 @@ export class Hud {
   toggleHelp(force) {
     const el = this.$('.help')
     const open = force ?? !el.classList.contains('open')
+    if (!open && el.contains(document.activeElement)) document.activeElement.blur()
     el.classList.toggle('open', open)
+    el.setAttribute('aria-hidden', String(!open))
+    if (open) this.$('#btn-help-close').focus()
   }
 
   /**
@@ -1004,7 +1009,7 @@ function escapeHtml(s) {
 /** Status → the colour family the top-bar counters already use for it. */
 function statusClass(status) {
   if (status === 'working') return 'working'
-  if (status === 'waiting') return 'waiting'
+  if (status === 'waiting' || status === 'requires-morgan') return 'waiting'
   if (status === 'blocked') return 'blocked'
   if (status === 'celebrating') return 'done'
   return 'idle'
@@ -1060,6 +1065,13 @@ function ago(ts) {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`
   return `${Math.floor(s / 86400)}d ago`
+}
+
+export function morganAttentionCount(threads) {
+  return threads.filter((thread) => {
+    if (typeof thread.requiresMorgan === 'boolean') return thread.requiresMorgan
+    return thread.status === 'requires-morgan' || thread.status === 'waiting' || thread.status === 'blocked'
+  }).length
 }
 
 const TEMPLATE = `
@@ -1150,10 +1162,10 @@ const TEMPLATE = `
 <div class="fps panel"></div>
 <div class="hint-pill panel"></div>
 
-<div class="help">
+<div class="help" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="help-title">
   <div class="sheet panel">
-    <h2>Bot Crossing</h2>
-    <p class="sub">Every coding-agent thread on this machine is a bot. They walk out of the ship, claim a plot for their repo, and build. Click one to open its thread; click a zone — its deck or its name — for the repo itself, and start a new conversation there. Hide a repo from that panel if you would rather not see it — its threads stay in your harness, and you can show it again from the list. Navigation works like Google Earth — drag the ground itself, right-drag to tilt, scroll to zoom in on whatever is under the cursor.</p>
+    <h2 id="help-title">Bot Crossing controls</h2>
+    <p class="sub"><strong>World controls are paused while this guide is open.</strong> Each native Hermes Kanban card is a worksite in its repository territory. Builder, Reviewer, and Drone bots appear only for authoritative current runs; Jynx watches each repository with visible work and signals when Morgan is needed. After choosing Explore colony below, drag the ground to pan, right-drag to tilt, and scroll or pinch to zoom at the pointer.</p>
     <div class="cols">
       <div>
         <div class="k"><span>Drag the ground</span><kbd>drag</kbd></div>
@@ -1168,7 +1180,7 @@ const TEMPLATE = `
       </div>
       <div>
         <div class="k"><span>Next needing you</span><kbd>N</kbd></div>
-        <div class="k"><span>Open thread</span><kbd>Enter</kbd></div>
+        <div class="k"><span>Open card</span><kbd>Enter</kbd></div>
         <div class="k"><span>Mark viewed</span><kbd>V</kbd></div>
         <div class="k"><span>Archive</span><kbd>A</kbd></div>
         <div class="k"><span>New conversation</span><kbd>C</kbd></div>
@@ -1181,14 +1193,14 @@ const TEMPLATE = `
       </div>
     </div>
     <div style="margin-top:16px">
-      <div class="legend-row"><i class="badge" style="background:#1a2b46;color:#8fb4ee">?</i> waiting on your reply — click to open the thread</div>
+      <div class="legend-row"><i class="badge" style="background:#1a2b46;color:#8fb4ee">?</i> Morgan attention required — click to open the card</div>
       <div class="legend-row"><i class="badge" style="background:#3d1c1c;color:#e88b8b">!</i> the session hit an error</div>
       <div class="legend-row"><i class="badge" style="background:#16301f;color:#7fd39a">⚒</i> running right now, building</div>
       <div class="legend-row"><i class="badge" style="background:#332b12;color:#e6c67f">✓</i> its pull request landed</div>
       <div class="legend-row"><i class="badge" style="background:#1d1f2e;color:#a9a8c0">z</i> nothing for three days</div>
     </div>
     <div style="margin-top:18px;display:flex;justify-content:flex-end">
-      <button class="btn primary" id="btn-help-close">Got it</button>
+      <button class="btn primary" id="btn-help-close">Explore colony</button>
     </div>
   </div>
 </div>

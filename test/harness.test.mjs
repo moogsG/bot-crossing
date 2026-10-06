@@ -39,6 +39,13 @@ test('harness ids are unique, and so are the id prefixes they hand out', () => {
   assert.equal(new Set(ids).size, ids.length)
 })
 
+test('registers one read-only native Hermes Kanban projection alongside upstream harnesses', () => {
+  const native = HARNESSES.filter(({ id }) => id === 'hermes-kanban')
+  assert.equal(native.length, 1)
+  assert.equal(native[0].setArchived, undefined)
+  assert.equal(HARNESSES.some(({ id }) => id === 'hermes'), true)
+})
+
 // ── ids are prefixed, and refs from the page are not trusted ──────────────────
 
 test('a session id that merely stringifies to a UUID is refused', async () => {

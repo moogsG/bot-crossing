@@ -7,6 +7,7 @@
  * in `server/harnesses/` — see the README there.
  */
 import { HARNESSES, detectedHarnesses, harnessById } from './harnesses/index.mjs'
+import { enrichProjectCatalog } from './codebase-memory.mjs'
 
 /**
  * A project's ground is keyed on its name, and a name is the last segment of its path — so two
@@ -79,8 +80,7 @@ export function disambiguateProjects(threads) {
  * A harness that throws is skipped rather than allowed to take the scan down with it: one
  * broken adapter should cost you that harness's threads, not the whole colony.
  */
-export async function scanThreads() {
-  const harnesses = await detectedHarnesses()
+export async function scanThreadsFrom(harnesses) {
   const lists = await Promise.all(
     harnesses.map(async (h) => {
       try {
@@ -95,6 +95,94 @@ export async function scanThreads() {
   const threads = disambiguateProjects(lists.flat())
   threads.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
   return threads
+}
+
+export async function scanThreads() {
+  return scanThreadsFrom(await detectedHarnesses())
+}
+
+/** The native colony is task-owned: transcript/session harnesses never become worksites or bots. */
+export async function scanNativeKanbanThreadsFrom(harnesses) {
+  return scanThreadsFrom(harnesses.filter((harness) => harness.id === 'hermes-kanban'))
+}
+
+export async function scanNativeKanbanThreads() {
+  return scanNativeKanbanThreadsFrom(await detectedHarnesses())
+}
+
+/** Optional harness-owned project catalogs, isolated with the same rules as thread scans. */
+export async function scanProjectCatalogFrom(harnesses, warn = (message) => console.warn(message)) {
+  const lists = await Promise.all(
+    harnesses.map(async (harness) => {
+      if (!harness.scanProjects) return []
+      try {
+        return await harness.scanProjects()
+      } catch (err) {
+        warn(`bot-crossing: harness "${harness.id}" failed to scan projects — ${err?.message || err}`)
+        return []
+      }
+    })
+  )
+  const bySlug = new Map()
+  for (const project of lists.flat()) {
+    if (!project?.slug || bySlug.has(project.slug)) continue
+    bySlug.set(project.slug, project)
+  }
+  return [...bySlug.values()].sort((a, b) => a.slug.localeCompare(b.slug) || a.id.localeCompare(b.id))
+}
+
+export async function scanProjectsFrom(
+  harnesses,
+  enrich = enrichProjectCatalog,
+  warn = (message) => console.warn(message)
+) {
+  const catalog = await scanProjectCatalogFrom(harnesses, warn)
+  try {
+    return await enrich(catalog)
+  } catch (err) {
+    warn(`bot-crossing: Codebase Memory failed to scan projects — ${err?.message || err}`)
+    return catalog
+  }
+}
+
+export async function scanProjects() {
+  return scanProjectsFrom(await detectedHarnesses())
+}
+
+/** Current task-linked run actors, isolated and deduplicated by stable actor id. */
+export async function scanActorSnapshotsFrom(harnesses, warn = (message) => console.warn(message)) {
+  const lists = await Promise.all(
+    harnesses.map(async (harness) => {
+      if (!harness.scanActors) return []
+      try {
+        return (await harness.scanActors()).map((actor) => ({ ...actor, harness: harness.id }))
+      } catch (err) {
+        warn(`bot-crossing: harness "${harness.id}" failed to scan actors — ${err?.message || err}`)
+        return []
+      }
+    })
+  )
+  const byId = new Map()
+  for (const actor of lists.flat()) {
+    if (!actor?.id || byId.has(actor.id)) continue
+    byId.set(actor.id, actor)
+  }
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id))
+}
+
+export async function scanActors() {
+  return scanActorSnapshotsFrom(await detectedHarnesses())
+}
+
+/** Native event ids are board-local, so exactly one detected harness owns this cursor. */
+export async function scanActorEvents(since) {
+  const harness = (await detectedHarnesses()).find((entry) => entry.scanActorEvents)
+  return harness ? harness.scanActorEvents(since) : { cursor: Math.max(0, Number(since) || 0), events: [] }
+}
+
+export async function actorEventCursor() {
+  const harness = (await detectedHarnesses()).find((entry) => entry.actorEventCursor)
+  return harness ? harness.actorEventCursor() : 0
 }
 
 /** What the HUD shows in the harness list: who is installed, and what they can do. */

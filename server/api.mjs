@@ -7,18 +7,36 @@ import { schemeHasHandler, schemeOf } from './lib/xdg.mjs'
 import { openInTerminal } from './lib/terminal.mjs'
 import { focusWindowOfPid } from './lib/windows.mjs'
 import {
+  actorEventCursor,
   defaultHarness,
   harnessStatus,
   newSession as harnessNewSession,
   openThread as harnessOpenThread,
+  scanActors,
+  scanActorEvents,
+  scanProjects,
   scanThreads,
+  scanNativeKanbanThreads,
 } from './scan.mjs'
+import { ACTOR_EVENT_VOCABULARY } from './harnesses/hermes-kanban.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.BOT_CROSSING_DATA || path.join(here, '..', 'data')
 const STATE_FILE = path.join(DATA_DIR, 'colony.json')
 
 const STATE_VERSION = 2
+
+export async function readActorSnapshot({ readCursor = actorEventCursor, readActors = scanActors } = {}) {
+  const cursor = await readCursor()
+  let scanCursor = cursor
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const actors = await readActors()
+    const through = await readCursor()
+    if (through === scanCursor) return { actors, cursor, through }
+    scanCursor = through
+  }
+  throw new Error('Lifecycle events kept changing during the actor snapshot')
+}
 
 /**
  * v1 keyed everything on a bare session id, because Claude Code was the only harness and its
@@ -395,15 +413,40 @@ export async function apiMiddleware(req, res, next) {
 
   try {
     if (url.pathname === '/api/threads' && req.method === 'GET') {
-      const threads = await reconcileArchived(await scanThreads())
+      const scanned = url.searchParams.get('source') === 'native-kanban'
+        ? await scanNativeKanbanThreads()
+        : await scanThreads()
+      const threads = await reconcileArchived(scanned)
       // A harness that is present but cannot read its own store says so here, rather than
       // appearing healthy in the list while quietly contributing nothing.
       const warnings = (await harnessStatus()).filter((h) => h.detected && h.error).map((h) => h.error)
       return send(res, 200, { threads, scannedAt: Date.now(), warnings })
     }
 
+    if (url.pathname === '/api/actors' && req.method === 'GET') {
+      const snapshot = await readActorSnapshot()
+      return send(res, 200, {
+        ...snapshot,
+        eventVocabulary: ACTOR_EVENT_VOCABULARY,
+        scannedAt: Date.now(),
+      })
+    }
+
+    if (url.pathname === '/api/events' && req.method === 'GET') {
+      const rawSince = url.searchParams.get('since') || '0'
+      const since = Number(rawSince)
+      if (!Number.isSafeInteger(since) || since < 0) {
+        return send(res, 400, { error: 'since must be a non-negative safe integer' })
+      }
+      return send(res, 200, await scanActorEvents(since))
+    }
+
     if (url.pathname === '/api/harnesses' && req.method === 'GET') {
       return send(res, 200, { harnesses: await harnessStatus() })
+    }
+
+    if (url.pathname === '/api/projects' && req.method === 'GET') {
+      return send(res, 200, { projects: await scanProjects(), scannedAt: Date.now() })
     }
 
     if (url.pathname === '/api/state' && req.method === 'GET') {

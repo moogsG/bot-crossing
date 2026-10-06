@@ -954,10 +954,12 @@ body {
 }
 
 .side .alarm {
-  width: 6px;
-  height: 6px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: var(--blue);
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 38%, transparent), 0 0 14px var(--blue);
   flex: none;
   animation: pulse 1.4s ease-in-out infinite;
 }
@@ -1230,8 +1232,10 @@ body {
   inset: 0;
   display: none;
   place-items: center;
-  background: rgba(6, 7, 11, 0.72);
-  backdrop-filter: blur(6px);
+  /* Do not blur a continuously rendered WebGL surface. Full-screen backdrop filtering
+     recomposites the native-resolution canvas every frame, precisely while onboarding is
+     explaining why world input is paused. A stronger flat scrim is clearer and much cheaper. */
+  background: rgba(6, 7, 11, 0.9);
   pointer-events: auto;
 }
 
@@ -1254,6 +1258,10 @@ body {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.help p.sub strong {
+  color: var(--text);
 }
 
 .help .cols {

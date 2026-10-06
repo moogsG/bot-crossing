@@ -423,6 +423,7 @@ export class Engine {
     if (now - (this._lastGovern || 0) < 1000) return
     this._lastGovern = now
 
+    const tail = this.perf.consumeWindow?.()
     const fps = this.perf.fps
     if (fps <= 0) return
     const ceiling = this._targetScale()
@@ -430,9 +431,17 @@ export class Engine {
     // The floor is relative to the display, and never above the user's own ceiling.
     const floor = Math.min(ceiling, 0.35 * (window.devicePixelRatio || 1))
 
-    // Sustained evidence, not one sample: 3 slow seconds to drop, 8 fast ones to climb.
-    this._slow = fps < 45 ? (this._slow || 0) + 1 : 0
-    this._fast = fps > 58 ? (this._fast || 0) + 1 : 0
+    // An EMA hides exactly the stutter people feel: mostly-fast frames can report 60+ fps
+    // while p95/p99 repeatedly miss the budget. Judge each independent one-second bucket as
+    // well as the average, then require three bad buckets so one cold shader frame cannot
+    // permanently lower a capable machine.
+    const p95 = tail?.p95 ?? this.perf.windowP95
+    const p99 = tail?.p99 ?? this.perf.windowP99
+    const max = tail?.max ?? this.perf.windowMax
+    const tailSlow = Number.isFinite(p95) && (p95 > 20.5 || p99 > 33 || max >= 100)
+    const tailFast = !Number.isFinite(p95) || (p95 <= 20.5 && p99 <= 33 && max < 100)
+    this._slow = fps < 48.8 || tailSlow ? (this._slow || 0) + 1 : 0
+    this._fast = fps > 58 && tailFast ? (this._fast || 0) + 1 : 0
     const dpr = window.devicePixelRatio || 1
 
     let next = current
@@ -543,10 +552,12 @@ class PerfMonitor {
     this.drawCalls = 0
     this.triangles = 0
     this._frames = 0
+    this._window = []
   }
 
   sample(dt, info) {
     const ms = dt * 1000
+    this._window.push(ms)
     const k = this._frames < 10 ? 0.3 : 0.06
     this.frameMs += (ms - this.frameMs) * k
     this.fps = this.frameMs > 0 ? 1000 / this.frameMs : 0
@@ -555,5 +566,18 @@ class PerfMonitor {
       this.drawCalls = info.render.calls
       this.triangles = info.render.triangles
     }
+  }
+
+  /** One independent governor bucket; sorting once a second is cheaper than hiding tails. */
+  consumeWindow() {
+    if (this._window.length < 30) return null
+    const values = this._window.sort((a, b) => a - b)
+    const at = (fraction) => values[Math.min(values.length - 1, Math.floor(values.length * fraction))]
+    const stats = { p95: at(0.95), p99: at(0.99), max: values[values.length - 1] }
+    this.windowP95 = stats.p95
+    this.windowP99 = stats.p99
+    this.windowMax = stats.max
+    this._window = []
+    return stats
   }
 }
