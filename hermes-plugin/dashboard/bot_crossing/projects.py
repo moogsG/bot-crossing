@@ -24,17 +24,30 @@ def _diagnostic(error: BaseException | None = None, *, absent: bool = False) -> 
 
 
 class ProjectReader:
-    """Read the project database below one effective HERMES_HOME only."""
+    """Aggregate project registries within one effective Hermes root."""
 
     def __init__(self, home: Path):
         self.home = home.expanduser().resolve()
-        self.database = self.home / "projects.db"
+        self.root = self.home.parent.parent if self.home.parent.name == "profiles" else self.home
 
-    def _connect(self) -> sqlite3.Connection:
-        if not self.database.is_file():
-            raise FileNotFoundError(self.database)
+    def _databases(self) -> list[Path]:
+        databases = [self.root / "projects.db"]
+        profiles = self.root / "profiles"
+        try:
+            profile_homes = sorted(
+                path for path in profiles.iterdir() if path.is_dir() and not path.is_symlink()
+            )
+        except OSError:
+            profile_homes = []
+        databases.extend(path / "projects.db" for path in profile_homes)
+        return databases
+
+    @staticmethod
+    def _connect(database: Path) -> sqlite3.Connection:
+        if not database.is_file():
+            raise FileNotFoundError(database)
         connection = sqlite3.connect(
-            f"{self.database.resolve().as_uri()}?mode=ro",
+            f"{database.resolve().as_uri()}?mode=ro",
             uri=True,
             timeout=0.15,
         )
@@ -51,40 +64,54 @@ class ProjectReader:
         return connection
 
     def diagnostic(self) -> dict[str, Any]:
-        try:
-            connection = self._connect()
-            connection.close()
-            return {"available": True, "code": "ok", "message": "Project registry is readable"}
-        except FileNotFoundError:
-            return _diagnostic(absent=True)
-        except (OSError, sqlite3.Error) as error:
-            return _diagnostic(error)
+        errors: list[BaseException] = []
+        for database in self._databases():
+            try:
+                connection = self._connect(database)
+                connection.close()
+                return {"available": True, "code": "ok", "message": "Project registry is readable"}
+            except FileNotFoundError:
+                continue
+            except (OSError, sqlite3.Error) as error:
+                errors.append(error)
+        return _diagnostic(errors[0]) if errors else _diagnostic(absent=True)
 
     def scan(self) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
-        try:
-            connection = self._connect()
+        projects: list[dict[str, str]] = []
+        warnings: list[dict[str, Any]] = []
+        found = False
+        for database in self._databases():
             try:
-                rows = connection.execute(
-                    "SELECT id, slug, name, primary_path FROM projects WHERE archived = 0"
-                ).fetchall()
-            finally:
-                connection.close()
-        except FileNotFoundError:
-            return [], [_diagnostic(absent=True)]
-        except (OSError, sqlite3.Error) as error:
-            return [], [_diagnostic(error)]
+                connection = self._connect(database)
+                found = True
+                try:
+                    rows = connection.execute(
+                        "SELECT id, slug, name, primary_path FROM projects WHERE archived = 0"
+                    ).fetchall()
+                finally:
+                    connection.close()
+            except FileNotFoundError:
+                continue
+            except (OSError, sqlite3.Error) as error:
+                warnings.append(_diagnostic(error))
+                continue
 
-        projects = []
-        for row in rows:
-            value = str(row["primary_path"] or "")
-            project_path = str(Path(value).expanduser().resolve()) if value else ""
-            projects.append(
-                {
-                    "id": str(row["id"]),
-                    "slug": str(row["slug"]),
-                    "name": str(row["name"]),
-                    "path": project_path,
-                }
-            )
+            for row in rows:
+                value = str(row["primary_path"] or "")
+                project_path = str(Path(value).expanduser().resolve()) if value else ""
+                projects.append(
+                    {
+                        "id": str(row["id"]),
+                        "slug": str(row["slug"]),
+                        "name": str(row["name"]),
+                        "path": project_path,
+                    }
+                )
         projects.sort(key=lambda item: (item["slug"], item["id"], item["path"]))
-        return projects, []
+        repositories: dict[str, dict[str, str]] = {}
+        for project in projects:
+            identity = f"path:{project['path']}" if project["path"] else f"project:{project['id']}"
+            repositories.setdefault(identity, project)
+        if not found and not warnings:
+            warnings.append(_diagnostic(absent=True))
+        return list(repositories.values()), warnings

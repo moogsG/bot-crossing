@@ -107,10 +107,11 @@ class KanbanReader:
 
     def __init__(self, home: Path, now: Callable[[], int] | None = None):
         self.home = home.expanduser().resolve()
+        self.root = self.home.parent.parent if self.home.parent.name == "profiles" else self.home
         self.now = now or (lambda: int(time.time() * 1000))
         candidates = (
-            self.home / "kanban" / "boards" / "native" / "kanban.db",
-            self.home / "kanban.db",
+            self.root / "kanban" / "boards" / "native" / "kanban.db",
+            self.root / "kanban.db",
         )
         self.database = next((path for path in candidates if path.is_file()), candidates[0])
 

@@ -78,11 +78,16 @@ def create_home(root: Path, name: str = "profile") -> tuple[Path, Path]:
             );
             """
         )
-    with sqlite3.connect(home / "projects.db") as db:
+    create_project_registry(home / "projects.db")
+    return home, board
+
+
+def create_project_registry(database: Path):
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database) as db:
         db.execute(
             "CREATE TABLE projects (id TEXT PRIMARY KEY, slug TEXT, name TEXT, primary_path TEXT, archived INTEGER)"
         )
-    return home, board
 
 
 def insert_task(board: Path, task_id: str, **overrides):
@@ -151,6 +156,37 @@ class PluginApiTests(unittest.TestCase):
         self.assertEqual([thread["ref"]["taskId"] for thread in second_threads], ["t_second"])
         self.assertEqual([project["id"] for project in first_projects], ["p_first"])
         self.assertEqual([project["id"] for project in second_projects], ["p_second"])
+
+    def test_nested_profile_uses_shared_board_and_aggregates_root_profile_projects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shared_home, board = create_home(root, "hermes")
+            active_home = shared_home / "profiles" / "reviewer"
+            sibling_home = shared_home / "profiles" / "jynx"
+            unrelated_home, unrelated_board = create_home(root, "unrelated")
+            create_project_registry(active_home / "projects.db")
+            create_project_registry(sibling_home / "projects.db")
+            insert_task(board, "t_shared")
+            insert_task(unrelated_board, "t_unrelated")
+            with sqlite3.connect(shared_home / "projects.db") as db:
+                db.execute("INSERT INTO projects VALUES ('p_shared', 'shared', 'Shared', '/shared', 0)")
+            with sqlite3.connect(active_home / "projects.db") as db:
+                db.execute("INSERT INTO projects VALUES ('p_active', 'active', 'Active', '/active', 0)")
+            with sqlite3.connect(sibling_home / "projects.db") as db:
+                db.execute("INSERT INTO projects VALUES ('p_other', 'other', 'Other', '/other', 0)")
+                db.execute("INSERT INTO projects VALUES ('p_duplicate', 'zzz', 'Duplicate', '/active', 0)")
+            with sqlite3.connect(unrelated_home / "projects.db") as db:
+                db.execute("INSERT INTO projects VALUES ('p_unrelated', 'unrelated', 'Unrelated', '/unrelated', 0)")
+            (shared_home / "profiles" / "escaped").symlink_to(unrelated_home, target_is_directory=True)
+
+            with patch.dict(os.environ, {"HERMES_HOME": str(active_home)}, clear=False):
+                health = self.module.health()
+                threads = self.module.threads()["threads"]
+                projects = self.module.projects()["projects"]
+
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual([thread["ref"]["taskId"] for thread in threads], ["t_shared"])
+        self.assertEqual([project["id"] for project in projects], ["p_active", "p_other", "p_shared"])
 
     def test_wal_active_board_preserves_thread_actor_and_event_contracts(self):
         with tempfile.TemporaryDirectory() as directory:
