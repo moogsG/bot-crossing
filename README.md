@@ -27,6 +27,22 @@ second process. For a built version, `npm start` (build + serve) or `npm run ser
 `dist/` already exists. Binds to `127.0.0.1` by default, and answers only its own page — see
 [Keeping it local](#keeping-it-local).
 
+### Hermes Desktop plugin
+
+`npm run build` also assembles the production plugin at `release/bot-crossing/`. The payload
+contains the Hermes plugin manifest, desktop contribution, dashboard API, and the built browser
+runtime at `dashboard/bot_crossing/app/`; it does not depend on this checkout at runtime.
+
+Validate the assembled artifact against the installed Hermes runtime before installing it:
+
+```bash
+hermes plugins doctor release/bot-crossing
+```
+
+For development, point the Hermes plugin workflow at the assembled directory after each build;
+the Desktop host discovers `desktop/plugin.js` from that same payload. Rebuild and restart the
+Desktop host after updating the plugin so its copied plugin artifact is refreshed.
+
 **macOS, Linux and Windows.** Opening a thread, revealing a folder and starting a new session
 all go through a `harness://` deep link handed to the OS opener — `open(1)` on macOS,
 `xdg-open` on Linux, ShellExecute on Windows. The scanning half was portable already. On Linux,

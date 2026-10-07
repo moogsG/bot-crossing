@@ -33,7 +33,7 @@
   ],
   "scripts": {
     "dev": "npm run assets --silent && vite",
-    "build": "npm run assets --silent && vite build",
+    "build": "npm run assets --silent && vite build && node tools/build-plugin.mjs",
     "start": "vite build && node server/serve.mjs",
     "serve": "node server/serve.mjs",
     "assets": "node tools/build-assets.mjs",

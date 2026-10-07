@@ -1,5 +1,6 @@
 node_modules
 dist
+release
 
 # Your colony: which repo sits on which plot, and what you archived. Holds the names and
 # paths of the repos you work in, so it stays out of the repository.
