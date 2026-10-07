@@ -1,4 +1,4 @@
-"""Profile-scoped Bot Crossing API; native Kanban data is strictly read-only."""
+"""Profile-scoped Bot Crossing API; native Kanban reads plus one explicit archive command."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import importlib
 import importlib.util
 import json
 import math
+import sqlite3
 from pathlib import Path
 import sys
 import time
@@ -81,13 +82,13 @@ def health() -> dict[str, Any]:
 
 @router.get("/bootstrap")
 def bootstrap() -> dict[str, Any]:
-    """Describe the immutable transport contract consumed by the embedded colony."""
+    """Describe the narrowly mutable transport contract consumed by the embedded colony."""
     home, board, project_reader = _readers()
     return {
         "plugin": "bot-crossing",
         "profile": _profile_identity(home),
         "source": "native-kanban",
-        "readOnly": True,
+        "readOnly": False,
         "eventVocabulary": list(ACTOR_EVENT_VOCABULARY),
         "endpoints": {
             "health": "health",
@@ -96,6 +97,7 @@ def bootstrap() -> dict[str, Any]:
             "actors": "actors",
             "events": "events",
             "state": "state",
+            "archive": "archive",
         },
         "board": board.diagnostic(),
         "projects": project_reader.diagnostic(),
@@ -161,6 +163,36 @@ def put_state(payload: dict[str, Any]) -> Any:
     return value
 
 
+def _archive_native_task(home: Path, task_id: str) -> bool:
+    """Use Hermes' Kanban domain operation, pinned to this effective home's board."""
+    from hermes_cli import kanban_db
+    from hermes_cli.kanban_db_connect import connect_closing
+
+    database = KanbanReader(home).database
+    with connect_closing(db_path=database) as connection:
+        return kanban_db.archive_task(connection, task_id)
+
+
+@router.post("/archive")
+def archive(payload: dict[str, Any]) -> Any:
+    """Archive only a task currently projected into this profile's Bot Crossing colony."""
+    task_id = payload.get("taskId")
+    if not isinstance(task_id, str) or not task_id:
+        return JSONResponse(status_code=400, content={"error": "taskId is required"})
+    home, reader, _ = _readers()
+    projected, warnings = reader.scan_threads()
+    if warnings:
+        return JSONResponse(status_code=503, content={"error": "Native Kanban board is unavailable"})
+    if task_id not in {thread["ref"]["taskId"] for thread in projected}:
+        return JSONResponse(status_code=404, content={"error": "Kanban task is not available in this colony"})
+    try:
+        if not _archive_native_task(home, task_id):
+            return JSONResponse(status_code=409, content={"error": "Kanban task could not be archived"})
+    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+        return JSONResponse(status_code=503, content={"error": "Could not archive Kanban task"})
+    return {"archived": True, "taskId": task_id}
+
+
 @router.get("/runtime")
 def runtime() -> Any:
     """Serve the prebuilt colony as an opaque-origin, self-contained frame document."""
@@ -190,6 +222,9 @@ def transport(payload: dict[str, Any]) -> dict[str, Any]:
     elif method == "PUT" and parsed.path == "/api/state":
         request_body = payload.get("body")
         result = put_state(request_body if isinstance(request_body, dict) else {})
+    elif method == "POST" and parsed.path == "/api/archive":
+        request_body = payload.get("body")
+        result = archive(request_body if isinstance(request_body, dict) else {})
     else:
         return {"status": 403, "body": {"error": "Bot Crossing request is not allowed"}}
 

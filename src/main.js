@@ -31,6 +31,8 @@ import {
   fetchState,
   saveState,
   openThread,
+  openKanban,
+  archiveKanbanTask,
   newSession,
   revealFolder,
 } from './game/api.js'
@@ -271,6 +273,11 @@ const actions = {
     const thread = threads.find((t) => t.id === selectedId)
     if (!thread) return
     try {
+      if (thread.source === 'native-kanban') {
+        await openKanban()
+        hud.toast('Opened native Kanban')
+        return
+      }
       const shown = await openThread(thread, settings.get('openIn'))
       colony.astronauts.celebrate(thread.id)
       const name = thread.harnessName || 'your harness'
@@ -282,12 +289,21 @@ const actions = {
     }
   },
 
-  // Archiving is the colony's own bookkeeping and nothing else: the thread leaves the map and
-  // the astronaut walks back to the ship. The harness's own records are never touched — see
-  // `reconcileArchived` in server/api.mjs for why that stopped being worth doing.
-  archiveThread: () => {
+  archiveThread: async () => {
     const thread = threads.find((t) => t.id === selectedId)
     if (!thread) return
+    if (thread.source === 'native-kanban') {
+      if (!window.confirm(`Archive “${thread.title}” on the native Kanban board?`)) return
+      try {
+        await archiveKanbanTask(thread.ref?.taskId)
+        select(null, {})
+        await poll()
+        hud.toast('Archived on native Kanban — heading home')
+      } catch (err) {
+        hud.toast(err.message || 'Could not archive that Kanban card', 'err')
+      }
+      return
+    }
     const foldedBefore = new Set(colony.dormantProjects || [])
     state.archived = [...new Set([...state.archived, thread.id])]
     state.archivedAt = { ...state.archivedAt, [thread.id]: Date.now() }

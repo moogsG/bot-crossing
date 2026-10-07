@@ -134,9 +134,15 @@ test('browser API uses the injected embedded transport without changing standalo
     })
   }
   try {
-    const { fetchThreads } = await import(`../src/game/api.js?embedded=${Date.now()}`)
+    const { fetchThreads, openKanban, archiveKanbanTask } = await import(`../src/game/api.js?embedded=${Date.now()}`)
     assert.deepEqual(await fetchThreads(), { threads: [] })
     assert.equal(calls[0][0], '/api/threads?source=native-kanban')
+    await openKanban()
+    await archiveKanbanTask('t_api')
+    assert.equal(calls[1][0], '/api/open-kanban')
+    assert.deepEqual(JSON.parse(calls[1][1].body), {})
+    assert.equal(calls[2][0], '/api/archive')
+    assert.deepEqual(JSON.parse(calls[2][1].body), { taskId: 't_api' })
   } finally {
     if (original === undefined) delete globalThis.__BOT_CROSSING_TRANSPORT__
     else globalThis.__BOT_CROSSING_TRANSPORT__ = original

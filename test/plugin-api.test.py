@@ -135,7 +135,7 @@ class PluginApiTests(unittest.TestCase):
     def setUp(self):
         self.module = load_plugin_api()
 
-    def test_kanban_routes_are_read_only_and_only_colony_state_is_writable(self):
+    def test_kanban_routes_expose_only_the_explicit_archive_mutation(self):
         self.assertEqual(
             [(method, path) for method, path, _ in self.module.router.routes],
             [
@@ -147,6 +147,7 @@ class PluginApiTests(unittest.TestCase):
                 ("GET", "/events"),
                 ("GET", "/state"),
                 ("PUT", "/state"),
+                ("POST", "/archive"),
                 ("GET", "/runtime"),
                 ("POST", "/transport"),
             ],
@@ -262,7 +263,7 @@ class PluginApiTests(unittest.TestCase):
                 writer.close()
 
         self.assertTrue(thread["running"])
-        self.assertFalse(thread["canArchive"])
+        self.assertTrue(thread["canArchive"])
         self.assertEqual(actor_payload["cursor"], 3)
         self.assertEqual(actor_payload["through"], 3)
         self.assertEqual(actor_payload["actors"][0]["id"], "hermes-kanban:actor:t_live:7")
@@ -340,7 +341,7 @@ class PluginApiTests(unittest.TestCase):
 
         self.assertEqual(health["profile"], "builder")
         self.assertEqual(bootstrap["source"], "native-kanban")
-        self.assertTrue(bootstrap["readOnly"])
+        self.assertFalse(bootstrap["readOnly"])
         self.assertNotIn(str(root), repr((health, bootstrap)))
 
     def test_colony_layout_state_is_profile_local_and_optimistically_locked(self):
@@ -375,6 +376,31 @@ class PluginApiTests(unittest.TestCase):
         self.assertEqual(seed["status"], 200)
         self.assertEqual(conflict["status"], 409)
         self.assertEqual(refused["status"], 403)
+
+    def test_archive_is_scoped_to_a_projected_task_and_uses_the_native_domain_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, board = create_home(Path(directory))
+            insert_task(board, "t_archive")
+            with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False), patch.object(
+                self.module, "_archive_native_task", return_value=True
+            ) as archive_native:
+                archived = self.module.transport({"method": "POST", "path": "/api/archive", "body": {"taskId": "t_archive"}})
+                missing = self.module.transport({"method": "POST", "path": "/api/archive", "body": {"taskId": "other"}})
+
+        self.assertEqual(archived, {"status": 200, "body": {"archived": True, "taskId": "t_archive"}})
+        self.assertEqual(missing["status"], 404)
+        archive_native.assert_called_once_with(home.resolve(), "t_archive")
+
+    def test_archive_write_lock_returns_a_bounded_non_500_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, board = create_home(Path(directory))
+            insert_task(board, "t_locked")
+            with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False), patch.object(
+                self.module, "_archive_native_task", side_effect=sqlite3.OperationalError("database is locked")
+            ):
+                response = self.module.transport({"method": "POST", "path": "/api/archive", "body": {"taskId": "t_locked"}})
+
+        self.assertEqual(response, {"status": 503, "body": {"error": "Could not archive Kanban task"}})
 
     def test_runtime_is_a_self_contained_sandbox_document_with_a_narrow_bridge_token(self):
         with tempfile.TemporaryDirectory() as directory:
