@@ -159,8 +159,25 @@ test('opaque frame requests are token-checked, allowlisted, and brokered through
 
   listener({
     source: loaded.frameWindow,
+    data: { kind: 'bot-crossing:request', token: 'bootstrap-token', id: 'open', url: '/api/open-kanban', method: 'POST' },
+  })
+  assert.deepEqual(loaded.navigations, ['/kanban'])
+  assert.equal(loaded.frameMessages[2].body.opened, true)
+
+  listener({
+    source: loaded.frameWindow,
+    data: { kind: 'bot-crossing:request', token: 'bootstrap-token', id: 'archive', url: '/api/archive', method: 'POST', body: '{"taskId":"t_1"}' },
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(calls[2][0], '/transport')
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[2][1].body)), {
+    path: '/api/archive', method: 'POST', body: { taskId: 't_1' },
+  })
+
+  listener({
+    source: loaded.frameWindow,
     data: { kind: 'bot-crossing:request', token: 'wrong', id: '2', url: '/api/state', method: 'PUT', body: '{}' },
   })
   await new Promise((resolve) => setImmediate(resolve))
-  assert.equal(calls.length, 2, 'a message without the bootstrap token must not reach the backend')
+  assert.equal(calls.length, 3, 'a message without the bootstrap token must not reach the backend')
 })

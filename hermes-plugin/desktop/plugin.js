@@ -12,6 +12,7 @@ const ALLOWED_REQUESTS = new Map([
   ['GET /api/events', true],
   ['GET /api/state', true],
   ['PUT /api/state', true],
+  ['POST /api/archive', true],
 ])
 
 function parseBody(value) {
@@ -55,6 +56,11 @@ function ColonyPage({ rest }) {
       if (method === 'GET' && parsed.pathname === '/__bot-crossing/assets') {
         respond(event.source, message.token, message.id, { status: 200, body: { assets: runtimeAssets } })
         runtimeAssets = {}
+        return
+      }
+      if (method === 'POST' && parsed.pathname === '/api/open-kanban') {
+        host.navigate('/kanban')
+        respond(event.source, message.token, message.id, { status: 200, body: { opened: true } })
         return
       }
       if (!ALLOWED_REQUESTS.has(`${method} ${parsed.pathname}`)) {

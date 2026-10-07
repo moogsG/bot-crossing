@@ -255,8 +255,8 @@ class KanbanReader:
                     "archived": False,
                     "sizeBytes": len(body.encode()),
                     "source": "native-kanban",
-                    "canOpen": False,
-                    "canArchive": False,
+                    "canOpen": True,
+                    "canArchive": True,
                     "requiresMorgan": attention["requiresMorgan"],
                     "attentionLabel": attention["attentionLabel"],
                     "details": {

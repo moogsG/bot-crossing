@@ -133,6 +133,12 @@ export async function saveState(state) {
  */
 export const openThread = (thread, via) => post('/api/open', { harness: thread.harness, ref: thread.ref, via })
 
+/** Open the native Hermes Kanban board from the opaque embedded colony. */
+export const openKanban = () => post('/api/open-kanban', {})
+
+/** Archive one native Kanban task through Bot Crossing's narrow, authenticated bridge. */
+export const archiveKanbanTask = (taskId) => post('/api/archive', { taskId })
+
 /** A brand new thread in a repo, via that harness's own new-session deep link. */
 export const newSession = (folder, harness, via) => post('/api/new-session', { folder, harness, via })
 
