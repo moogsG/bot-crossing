@@ -20,19 +20,37 @@ import { enrichProjectCatalog } from './codebase-memory.mjs'
  * name is also the key a saved layout is stored under, so disambiguating unconditionally would
  * move every plot on everybody's map to fix something most people never hit.
  */
-function disambiguateProjects(threads) {
+export function disambiguateProjects(threads) {
+  // Windows hands the same checkout back as `c:\…` from one transcript and `C:\…` from
+  // another: the CLI's project-directory encoding keeps whatever case the drive letter was
+  // given. Those are one path, not two — and counted as two they make an unambiguous name look
+  // ambiguous, which renames a plot on a machine that has no collision at all.
+  //
+  // Codex hands the same checkout back a third way: with the extended-length prefix, as
+  // `\\?\C:\…`. That does not begin with a drive letter, so the case fold below never reached
+  // it and one folder on disk arrived here as two paths — enough to make `geh` look ambiguous
+  // against itself and rename both plots to their full absolute paths. Drop the prefix first,
+  // but only where a drive follows it: `\\?\UNC\server\share` is a different animal, and
+  // folding its first character would be wrong.
+  const canonical = (p) => {
+    const s = /^\\\\\?\\[A-Za-z]:[\\/]/.test(p) ? p.slice(4) : p
+    return /^[A-Za-z]:[\\/]/.test(s) ? s[0].toLowerCase() + s.slice(1) : s
+  }
+
   const pathsByName = new Map()
   for (const t of threads) {
     if (!t.project) continue
     if (!pathsByName.has(t.project)) pathsByName.set(t.project, new Set())
-    pathsByName.get(t.project).add(t.projectPath || '')
+    pathsByName.get(t.project).add(canonical(t.projectPath || ''))
   }
 
   const renames = new Map()
   for (const [name, paths] of pathsByName) {
     if (paths.size < 2) continue
     const list = [...paths]
-    const segments = list.map((p) => p.split('/').filter(Boolean))
+    // Both separators. A Windows path splits on neither otherwise, leaving a single "segment"
+    // that is the whole absolute path — which then becomes the plot's name on the map.
+    const segments = list.map((p) => p.split(/[\\/]/).filter(Boolean))
     const deepest = Math.max(...segments.map((s) => s.length))
 
     // Take one more trailing segment until every path in the group reads differently. Paths
@@ -51,7 +69,7 @@ function disambiguateProjects(threads) {
 
   if (!renames.size) return threads
   return threads.map((t) => {
-    const next = renames.get(`${t.project || ''}\u0000${t.projectPath || ''}`)
+    const next = renames.get(`${t.project || ''}\u0000${canonical(t.projectPath || '')}`)
     return next && next !== t.project ? { ...t, project: next } : t
   })
 }
@@ -62,8 +80,7 @@ function disambiguateProjects(threads) {
  * A harness that throws is skipped rather than allowed to take the scan down with it: one
  * broken adapter should cost you that harness's threads, not the whole colony.
  */
-export async function scanThreads() {
-  const harnesses = await detectedHarnesses()
+export async function scanThreadsFrom(harnesses) {
   const lists = await Promise.all(
     harnesses.map(async (h) => {
       try {
@@ -78,6 +95,19 @@ export async function scanThreads() {
   const threads = disambiguateProjects(lists.flat())
   threads.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
   return threads
+}
+
+export async function scanThreads() {
+  return scanThreadsFrom(await detectedHarnesses())
+}
+
+/** The native colony is task-owned: transcript/session harnesses never become worksites or bots. */
+export async function scanNativeKanbanThreadsFrom(harnesses) {
+  return scanThreadsFrom(harnesses.filter((harness) => harness.id === 'hermes-kanban'))
+}
+
+export async function scanNativeKanbanThreads() {
+  return scanNativeKanbanThreadsFrom(await detectedHarnesses())
 }
 
 /** Optional harness-owned project catalogs, isolated with the same rules as thread scans. */
@@ -119,7 +149,7 @@ export async function scanProjects() {
   return scanProjectsFrom(await detectedHarnesses())
 }
 
-/** Current task-linked run actors, isolated and deduplicated by their stable actor id. */
+/** Current task-linked run actors, isolated and deduplicated by stable actor id. */
 export async function scanActorSnapshotsFrom(harnesses, warn = (message) => console.warn(message)) {
   const lists = await Promise.all(
     harnesses.map(async (harness) => {
@@ -132,12 +162,12 @@ export async function scanActorSnapshotsFrom(harnesses, warn = (message) => cons
       }
     })
   )
-  const actorsById = new Map()
+  const byId = new Map()
   for (const actor of lists.flat()) {
-    if (!actor?.id || actorsById.has(actor.id)) continue
-    actorsById.set(actor.id, actor)
+    if (!actor?.id || byId.has(actor.id)) continue
+    byId.set(actor.id, actor)
   }
-  return [...actorsById.values()].sort((a, b) => a.id.localeCompare(b.id))
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id))
 }
 
 export async function scanActors() {
@@ -146,21 +176,28 @@ export async function scanActors() {
 
 /** Native event ids are board-local, so exactly one detected harness owns this cursor. */
 export async function scanActorEvents(since) {
-  const harnesses = await detectedHarnesses()
-  const harness = harnesses.find((entry) => entry.scanActorEvents)
+  const harness = (await detectedHarnesses()).find((entry) => entry.scanActorEvents)
   return harness ? harness.scanActorEvents(since) : { cursor: Math.max(0, Number(since) || 0), events: [] }
 }
 
 export async function actorEventCursor() {
-  const harnesses = await detectedHarnesses()
-  const harness = harnesses.find((entry) => entry.actorEventCursor)
+  const harness = (await detectedHarnesses()).find((entry) => entry.actorEventCursor)
   return harness ? harness.actorEventCursor() : 0
 }
 
 /** What the HUD shows in the harness list: who is installed, and what they can do. */
 export async function harnessStatus() {
   const detected = new Set((await detectedHarnesses()).map((h) => h.id))
-  return HARNESSES.map((h) => ({ id: h.id, name: h.name, detected: detected.has(h.id) }))
+  return Promise.all(
+    HARNESSES.map(async (h) => ({
+      id: h.id,
+      name: h.name,
+      detected: detected.has(h.id),
+      // Optional. An adapter that can see its harness but cannot read it — wrong Node, a store
+      // it does not understand — says why here instead of failing silently on every poll.
+      error: h.diagnostic ? await h.diagnostic().catch(() => '') : '',
+    }))
+  )
 }
 
 /** The harness to use when a caller has not said — the first one present on this machine. */
@@ -175,22 +212,7 @@ const dispatch = (harnessId) => {
   return h
 }
 
-export const openThread = (harnessId, ref) => dispatch(harnessId).openThread(ref)
+/** Both may be async: an adapter that has to look for a CLI on disk cannot answer synchronously. */
+export const openThread = async (harnessId, ref) => dispatch(harnessId).openThread(ref)
 
-export const newSession = (harnessId, dir) => dispatch(harnessId).newSession(dir)
-
-export const setThreadArchived = (harnessId, ref, archived) => dispatch(harnessId).setArchived(ref, archived)
-
-/**
- * When a harness's own app last started, used to tell an archive it has already read from
- * one still waiting on disk. A harness with no long-lived app has nothing to report.
- */
-export async function harnessAppStartedAt(harnessId) {
-  const h = harnessById(harnessId)
-  if (!h?.appStartedAt) return 0
-  try {
-    return await h.appStartedAt()
-  } catch {
-    return 0
-  }
-}
+export const newSession = async (harnessId, dir) => dispatch(harnessId).newSession(dir)

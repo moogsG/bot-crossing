@@ -1,4 +1,6 @@
 import * as THREE from 'three'
+import { OVERLAY_LAYER } from '../core/engine.js'
+import { withCurve } from '../core/curve.js'
 import {
   mdiHelpCircle,
   mdiAlert,
@@ -44,7 +46,7 @@ export const BADGE = {
   worker: 10,
 }
 
-/** Badge tint. Pushed past 1.0 so the bloom pass gives them a soft halo. */
+/** HDR badge tint, tone-mapped with the scene after bloom and depth of field. */
 const BADGE_COLOR = {
   0: [0.42, 1.35, 2.9],
   1: [2.9, 0.6, 0.5],
@@ -99,6 +101,8 @@ export class Indicators {
 
     this.material = this._material()
     this.mesh = new THREE.InstancedMesh(geo, this.material, capacity)
+    // Drawn after bloom and tilt-shift, so the symbol stays readable over any scene depth.
+    this.mesh.layers.set(OVERLAY_LAYER)
     this.mesh.count = 0
     this.mesh.frustumCulled = false
     this.mesh.renderOrder = 10
@@ -129,6 +133,7 @@ export class Indicators {
 
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uFrameScale = { value: new THREE.Vector2(1 / COLS, 1 / ROWS) }
+      withCurve(shader)
       this.uniforms = shader.uniforms
 
       shader.vertexShader = shader.vertexShader
@@ -145,7 +150,7 @@ export class Indicators {
         .replace('#include <uv_vertex>', `#include <uv_vertex>\n vMapUv = uv * uFrameScale + aFrame;`)
         .replace(
           '#include <project_vertex>',
-          `vec4 mvPosition = modelViewMatrix * vec4( aCenter, 1.0 );
+          `vec4 mvPosition = viewMatrix * vec4( bcBend( ( modelMatrix * vec4( aCenter, 1.0 ) ).xyz ), 1.0 );
            float dist = -mvPosition.z;
            // Mostly-constant screen size: the linear term cancels perspective so a badge
            // stays readable when the camera is pulled right out, while the constant term
@@ -206,6 +211,9 @@ export class Indicators {
     let n = 0
 
     for (const agent of agents) {
+      // Cleared for everyone first: an agent that loses its badge this frame must lose its
+      // hit box with it, or the picker keeps offering a bubble that is no longer drawn.
+      agent.badgeSize = 0
       if (n >= this.capacity) break
       if (agent.scale < 0.4 || agent.state === 'gone') continue
       const badge = statusFor(agent)
@@ -229,6 +237,12 @@ export class Indicators {
       // Urgent badges breathe a little so they pull the eye across a busy colony.
       sizes[n] = urgent ? 0.166 + Math.sin(elapsed * 4.2 + agent.phase) * 0.013 : 0.126
       fades[n] = FADE_BY_BADGE[badge] ?? 1
+
+      // Handed to the picker so a click can hit the bubble itself rather than the head under
+      // it. It cannot be derived over there: the lift and the size are decided in view space
+      // by the vertex shader above, and only this loop knows which frame each agent got.
+      agent.badgeSize = sizes[n]
+      agent.badgeY = centers[n * 3 + 1]
 
       const c = BADGE_COLOR[badge] || [1, 1, 1]
       this._color.setRGB(c[0], c[1], c[2])
@@ -380,10 +394,10 @@ function platePath(ctx) {
 }
 
 /**
- * The symbols, in atlas order: waiting, blocked, working, done, paused, sleeping, spawning,
- * leaving, reviewer inspection, drone, and generic worker tools.
+ * The symbols, in atlas order: waiting, blocked, working, done, paused, sleeping,
+ * spawning, leaving, reviewer inspection, drone, and generic worker tools.
  *
- * Material Design Icons, imported as path data rather than drawn here. Eleven symbols that have
+ * Material Design Icons, imported as path data rather than drawn here. Eight symbols that have
  * to look like one family is a type problem — one weight, one optical size, one set of
  * terminals — and a set somebody has already balanced beats one assembled a curve at a time.
  */

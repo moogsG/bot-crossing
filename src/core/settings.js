@@ -35,6 +35,10 @@ export const PRESETS = {
       stars: false,
       ibl: false,
       tiltShift: false,
+      colorGrade: false,
+      ambientOcclusion: 0,
+      clouds: false,
+      fauna: 'low',
     },
   },
   low: {
@@ -53,6 +57,10 @@ export const PRESETS = {
       stars: true,
       ibl: false,
       tiltShift: false,
+      colorGrade: true,
+      ambientOcclusion: 0,
+      clouds: true,
+      fauna: 'low',
     },
   },
   balanced: {
@@ -71,6 +79,10 @@ export const PRESETS = {
       stars: true,
       ibl: true,
       tiltShift: true,
+      colorGrade: true,
+      ambientOcclusion: 0.25,
+      clouds: true,
+      fauna: 'full',
     },
   },
   high: {
@@ -89,6 +101,10 @@ export const PRESETS = {
       stars: true,
       ibl: true,
       tiltShift: true,
+      colorGrade: true,
+      ambientOcclusion: 0.25,
+      clouds: true,
+      fauna: 'full',
     },
   },
   ultra: {
@@ -107,6 +123,10 @@ export const PRESETS = {
       stars: true,
       ibl: true,
       tiltShift: true,
+      colorGrade: true,
+      ambientOcclusion: 0.25,
+      clouds: true,
+      fauna: 'full',
     },
   },
 }
@@ -115,36 +135,78 @@ export const SHADOW_SIZES = { off: 0, low: 1024, high: 2048, ultra: 4096 }
 const TEXTURE_SIZES = { low: 256, medium: 512, high: 1024, ultra: 1024 }
 const PARTICLE_BUDGET = { off: 0, low: 900, full: 3000 }
 
+/**
+ * The largest `maxAgents` any preset asks for. Anything sized once at boot — the badge buffers,
+ * which are never rebuilt — allocates against this rather than against whatever preset happened
+ * to be active, so raising quality later cannot outrun a buffer.
+ */
+export const MAX_AGENT_CAP = Math.max(...Object.values(PRESETS).map((p) => p.values.maxAgents || 0))
+
 const DEFAULTS = {
   preset: 'balanced',
   ...PRESETS.balanced.values,
 
   // World
   planet: 'moon',
+  /**
+   * Fold away repos where every thread has been quiet for three days. On by default: with
+   * several harnesses read at once the map otherwise fills with every checkout you have ever
+   * opened, and the few repos actually being worked in get lost among them. It is reversible in
+   * one click and a folded repo returns to the same ground the moment a thread wakes up.
+   */
+  hideDormant: true,
   timeOfDay: 0.32, // 0..1 — 0 is midnight, 0.5 is noon
   autoTime: false,
+  /** Sky follows this machine's own clock. Wins over `autoTime`; both off is manual. */
+  clockTime: false,
   dayLength: 240, // seconds for a full cycle when autoTime is on
 
   // Look
   exposure: 1.0,
   bloomStrength: 0.25,
-  tiltShiftStrength: 0.4, // 0..1 — share of the effect's full blur radius (2% of frame height)
+  tiltShiftStrength: 0.2, // 0..1 — share of the effect's full blur radius (2% of frame height)
   tiltShiftAngle: 0, // degrees — 0 keeps the sharp band horizontal
   iblIntensity: 1.0,
   fov: 38,
+  /**
+   * How far the world bends away toward the horizon — Animal Crossing's little-round-world
+   * look. 0 is flat. The bend is keyed off wherever the camera is looking, so the ground
+   * under the cursor never moves; only the far side of the colony dips.
+   */
+  worldCurve: 0.45,
+  /** The colour grade on top of tone mapping: saturation, a warm cast, and a soft vignette. */
+  saturation: 1.0,
+  vignette: 0.3,
+
+  // Sound. On by default but silent until the first click — browsers insist — and every
+  // layer has its own fader, because the one thing an always-open window must never do is
+  // make a noise you cannot turn down.
+  sound: true,
+  masterVolume: 0.6,
+  ambienceVolume: 0.8,
+  effectsVolume: 0.8,
 
   // Behaviour
   autoQuality: true, // drop render scale when frames get expensive
   autoFrame: false, // ease the camera back to isometric when you stop dragging; opt-in
+  // On by default: picking a bot is nearly always the start of watching it, and having to find
+  // the toggle first meant the one you clicked had usually walked off before you got there.
+  followSelected: true, // track the selected bot while retaining manual camera controls
+  /** Set once when the follow default flipped on, so the migration never runs twice. */
+  followDefaultOn: false,
   showFps: false,
   showLabels: true,
   reducedMotion: false,
+
+  // Opening
+  openIn: 'app', // 'app' | 'terminal' — the harness's desktop app, or its CLI in a new window
 }
 
 /** Keys whose change forces a full rebuild of the world (terrain, scatter, sky). */
 const WORLD_KEYS = new Set(['planet', 'groundDetail', 'scatterDensity', 'stars'])
 /** Keys that only need the renderer reconfigured. */
 const RENDER_KEYS = new Set([
+  'autoQuality',
   'renderScale',
   'shadows',
   'bloom',
@@ -154,11 +216,27 @@ const RENDER_KEYS = new Set([
   'tiltShift',
   'tiltShiftStrength',
   'tiltShiftAngle',
+  'colorGrade',
+  'saturation',
+  'vignette',
+  'ambientOcclusion',
 ])
 
 export class Settings {
   constructor() {
-    this.values = { ...DEFAULTS, ...load() }
+    const stored = load()
+    this.values = { ...DEFAULTS, ...stored }
+    // An existing Low/Potato install should not inherit Balanced's new effect by accident.
+    if (!Object.hasOwn(stored, 'ambientOcclusion')) {
+      this.values.ambientOcclusion = PRESETS[this.values.preset]?.values.ambientOcclusion ?? DEFAULTS.ambientOcclusion
+    }
+    // Following the selected bot used to be opt-in, so every existing colony has `false` stored
+    // against it and a changed default would never reach one. Turned on once, and remembered as
+    // done — otherwise this would fight anybody who turns it back off, every single boot.
+    if (!Object.hasOwn(stored, 'followDefaultOn')) {
+      this.values.followSelected = true
+      this.values.followDefaultOn = true
+    }
     this.listeners = new Set()
     this._saveTimer = 0
   }
@@ -228,8 +306,13 @@ export class Settings {
    * of thirty times on the way in.
    */
   applyAll(values) {
+    const incoming = { ...values }
+    // The colony file may predate this setting too (for example, in a fresh browser).
+    if (PRESETS[incoming.preset] && !Object.hasOwn(incoming, 'ambientOcclusion')) {
+      incoming.ambientOcclusion = PRESETS[incoming.preset].values.ambientOcclusion
+    }
     const changed = []
-    for (const [key, value] of Object.entries(values || {})) {
+    for (const [key, value] of Object.entries(incoming)) {
       if (!(key in this.values) || this.values[key] === value) continue
       this.values[key] = value
       changed.push(key)

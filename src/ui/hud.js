@@ -1,8 +1,9 @@
 import { PRESETS, PLANETS_ORDER } from './hud-data.js'
 import { PLANETS } from '../world/planet.js'
-import { TIMES } from '../world/sky.js'
+import { TIMES, systemTimeOfDay } from '../world/sky.js'
 import { STATUS_LABEL } from '../game/colony.js'
 import { FACE, FRAME_COLS, FRAME_ROWS } from '../agents/faces.js'
+import { PLOT_PALETTE, hashString } from '../world/plots.js'
 
 /**
  * The whole HUD, in plain DOM.
@@ -22,7 +23,8 @@ import { FACE, FRAME_COLS, FRAME_ROWS } from '../agents/faces.js'
  * here rather than asked for.
  */
 const IS_MAC = /Mac/.test(navigator.platform)
-const FILE_MANAGER = IS_MAC ? 'Finder' : /Win/.test(navigator.platform) ? 'Explorer' : 'Files'
+const IS_WIN = /Win/.test(navigator.platform)
+const FILE_MANAGER = IS_MAC ? 'Finder' : IS_WIN ? 'Explorer' : 'Files'
 
 const ICON = {
   settings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
@@ -43,6 +45,8 @@ const ICON = {
   copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>`,
   locate: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7.6"/><path d="M12 1.8v2.6M12 19.6v2.6M1.8 12h2.6M19.6 12h2.6"/></svg>`,
   orbit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><ellipse cx="12" cy="12" rx="10.2" ry="4.6" transform="rotate(-24 12 12)"/><circle cx="21" cy="8.2" r="1.5" fill="currentColor" stroke="none"/></svg>`,
+  sound: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a8 8 0 0 1 0 11"/></svg>`,
+  soundOff: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg>`,
 }
 
 const STAT_DEFS = [
@@ -50,7 +54,7 @@ const STAT_DEFS = [
   { key: 'waiting', label: 'need you', cls: 'waiting' },
   { key: 'blocked', label: 'blocked', cls: 'blocked' },
   { key: 'celebrating', label: 'shipped', cls: 'done' },
-  { key: 'agents', label: 'crew', cls: 'idle' },
+  { key: 'agents', label: 'bots', cls: 'idle' },
 ]
 
 export class Hud {
@@ -59,6 +63,7 @@ export class Hud {
     this.actions = actions
     this.visible = true
     this._last = {}
+    this.hiddenOpen = false
 
     this.el = document.createElement('div')
     this.el.className = 'hud'
@@ -72,6 +77,11 @@ export class Hud {
     this._buildAvatar()
     this._wire()
     this.syncSettings()
+    // Read layout when panels resize/change, never in the animation loop.
+    this._layoutObserver = new ResizeObserver(() => this._syncLayout())
+    this._layoutObserver.observe(this.el)
+    this._layoutObserver.observe(this.$('.side'))
+    this._syncLayout()
   }
 
   // ── construction ────────────────────────────────────────────────────────────────────
@@ -84,7 +94,7 @@ export class Hud {
       b.className = `stat ${def.cls}`
       b.type = 'button'
       b.dataset.key = def.key
-      b.title = `Jump to the next ${def.label} astronaut`
+      b.title = `Jump to the next ${def.label} bot`
       b.innerHTML = `<i class="pip"></i><span class="n">0</span><span class="lbl">${def.label}</span>`
       b.type = 'button'
       b.addEventListener('click', () => this.actions.focusStatus?.(def.key))
@@ -168,7 +178,7 @@ export class Hud {
       ),
       this._toggle('Adaptive quality', 'autoQuality', 'Quietly drops render scale if frames get expensive.'),
       this._slider('Scatter', 'scatterDensity', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`),
-      this._slider('Max crew', 'maxAgents', 10, 200, 10, (v) => String(v)),
+      this._slider('Max bots', 'maxAgents', 10, 200, 10, (v) => String(v)),
       this._toggle('Stars', 'stars')
     )
     body.appendChild(perf)
@@ -197,16 +207,28 @@ export class Hud {
     const light = group('Lighting')
     light.append(
       chips(
-        TIMES.map((t) => ({ id: t.id, label: t.label })),
-        () => nearestTime(this.settings.get('timeOfDay')),
+        // `Live` is a time of day like the others from where you are standing, so it belongs
+        // in the same row rather than in a toggle further down.
+        [...TIMES.map((t) => ({ id: t.id, label: t.label })), { id: 'live', label: 'Live' }],
+        () => (this.settings.get('clockTime') ? 'live' : nearestTime(this.settings.get('timeOfDay'))),
         (id) => {
           this.settings.set('autoTime', false)
-          this.settings.set('timeOfDay', TIMES.find((t) => t.id === id).value)
+          this.settings.set('clockTime', id === 'live')
+          if (id === 'live') this.settings.set('timeOfDay', systemTimeOfDay())
+          else this.settings.set('timeOfDay', TIMES.find((t) => t.id === id).value)
         },
         this.controls
       ),
-      this._slider('Time of day', 'timeOfDay', 0, 1, 0.005, clockLabel),
-      this._toggle('Cycle day/night', 'autoTime', 'Runs the clock forward on its own.'),
+      this._slider('Time of day', 'timeOfDay', 0, 1, 0.005, clockLabel, undefined, () => {
+        // Reaching for the slider is a request for a particular light, so stop following the
+        // clock — otherwise the next frame would drag the thumb straight back.
+        this.settings.set('clockTime', false)
+      }),
+      this._toggle(
+        'Cycle day/night',
+        'autoTime',
+        'Runs the clock forward on its own. Ignored while the sky is following this machine’s clock.'
+      ),
       this._slider('Cycle length', 'dayLength', 30, 900, 30, (v) => `${Math.round(v / 60)}m`),
       this._toggle(
         'Environment light',
@@ -221,7 +243,30 @@ export class Hud {
 
     // View.
     const view = group('View')
+    // The server refuses terminals on Windows, so a choice there would only ever toast an error.
+    if (!IS_WIN) {
+      view.append(
+        this._select(
+          'Open threads in',
+          'openIn',
+          [
+            ['app', 'Desktop app'],
+            ['terminal', 'Terminal'],
+          ],
+          'Terminal runs the harness’s own CLI in a new window, so the CLI has to be installed. ' +
+            'BOT_CROSSING_TERMINAL or $TERMINAL picks the emulator.'
+        )
+      )
+    }
     view.append(
+      this._toggle(
+        'Hide dormant repos',
+        'hideDormant',
+        'Takes a repo off the map when every thread in it has been quiet for three days. Its threads are untouched, and it comes back to the same ground the moment one wakes up.'
+      )
+    )
+    view.append(
+      this._toggle('Follow selected bot', 'followSelected', 'Tracks the selected bot until you deselect. Drag to pan, right-drag to orbit, and scroll to zoom.'),
       this._toggle('Return to isometric', 'autoFrame', 'Eases the angle back when you stop dragging.'),
       this._slider('Field of view', 'fov', 20, 60, 1, (v) => `${v}°`),
       this._toggle('Project labels', 'showLabels'),
@@ -229,6 +274,53 @@ export class Hud {
       this._toggle('Show FPS', 'showFps')
     )
     body.appendChild(view)
+
+    // Look.
+    const look = group('Look')
+    look.append(
+      this._slider(
+        'Ambient occlusion',
+        'ambientOcclusion',
+        0,
+        1,
+        0.05,
+        (v) => v === 0 ? 'Off' : `${Math.round(v * 100)}%`,
+        'Soft shading in creases and where surfaces meet. Try 20–35% for a subtle effect; 0 turns it off.'
+      ),
+      this._slider(
+        'World curve',
+        'worldCurve',
+        0,
+        1,
+        0.05,
+        (v) => `${Math.round(v * 100)}%`,
+        'How far the ground bends away toward the horizon. The point under the cursor never moves.'
+      ),
+      this._toggle('Colour grade', 'colorGrade', 'Saturation, warmth, lifted shadows and a soft vignette on the finished frame.'),
+      this._slider('Saturation', 'saturation', 0.6, 1.5, 0.05, (v) => v.toFixed(2)),
+      this._slider('Vignette', 'vignette', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`),
+      this._toggle('Clouds', 'clouds', 'Cumulus drifting over worlds that have weather.'),
+      this._select('Wildlife', 'fauna', [
+        ['off', 'Off'],
+        ['low', 'Some'],
+        ['full', 'Full'],
+      ])
+    )
+    body.appendChild(look)
+
+    // Sound.
+    const sound = group('Sound')
+    sound.append(
+      this._toggle(
+        'Ambient sound',
+        'sound',
+        'A bed for each world, things calling out on their own clocks, and work you can hear where it is happening. Louder as you lean in.'
+      ),
+      this._slider('Master', 'masterVolume', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`),
+      this._slider('Ambience', 'ambienceVolume', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`, 'Beds and the sounds of the world.'),
+      this._slider('Effects', 'effectsVolume', 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`, 'Hammering, drones, splashes, the chime when somebody needs you.')
+    )
+    body.appendChild(sound)
   }
 
   _row(label, hint) {
@@ -247,6 +339,7 @@ export class Hud {
     b.type = 'button'
     b.className = 'toggle'
     b.setAttribute('role', 'switch')
+    b.setAttribute('aria-label', label)
     b.addEventListener('click', () => this.settings.set(key, !this.settings.get(key)))
     row.appendChild(b)
     this.controls.push({
@@ -281,19 +374,23 @@ export class Hud {
     return row
   }
 
-  _slider(label, key, min, max, step, format, hint) {
+  _slider(label, key, min, max, step, format, hint, onInput) {
     const row = this._row(label, hint)
     const wrap = document.createElement('div')
     wrap.style.cssText = 'display:flex;align-items:center;gap:8px'
     const input = document.createElement('input')
     input.type = 'range'
+    input.setAttribute('aria-label', label)
     input.className = 'slider'
     input.min = min
     input.max = max
     input.step = step
     const out = document.createElement('span')
     out.className = 'value'
-    input.addEventListener('input', () => this.settings.set(key, Number(input.value)))
+    input.addEventListener('input', () => {
+      onInput?.()
+      this.settings.set(key, Number(input.value))
+    })
     wrap.append(input, out)
     row.appendChild(wrap)
     this.controls.push({
@@ -326,6 +423,26 @@ export class Hud {
     const on = (sel, ev, fn) => this.$(sel).addEventListener(ev, fn)
 
     on('#btn-settings', 'click', () => this.toggleSettings())
+    // On a phone the sidebar is a sheet: a tap on its brand row (not on its buttons) pulls
+    // it up or lets it drop, and a drag on the row does the same by direction.
+    const brandbar = this.$('.side .brandbar')
+    const grab = this.$('.side .grab')
+    let dragY = null
+    const startDrag = (e) => {
+      if (!this.isPhone() || e.target.closest('.btn')) return
+      dragY = e.clientY
+    }
+    const endDrag = (e) => {
+      if (dragY === null) return
+      const dy = e.clientY - dragY
+      dragY = null
+      if (Math.abs(dy) > 24) this.toggleSheet(dy < 0)
+      else if (!e.target.closest('.btn')) this.toggleSheet()
+    }
+    for (const el of [brandbar, grab]) {
+      el.addEventListener('pointerdown', startDrag)
+      el.addEventListener('pointerup', endDrag)
+    }
     on('#btn-close-settings', 'click', () => this.toggleSettings(false))
     on('#btn-hide', 'click', () => this.toggleUi())
     on('#btn-help', 'click', () => this.toggleHelp())
@@ -335,12 +452,17 @@ export class Hud {
     on('#btn-orbit', 'click', () => this.setOrbit(this.actions.toggleOrbit?.()))
     on('#btn-planet', 'click', () => this.actions.cyclePlanet?.())
     on('#btn-time', 'click', () => this.actions.cycleTime?.())
+    on('#btn-sound', 'click', () => this.settings.set('sound', !this.settings.get('sound')))
     on('#btn-open', 'click', () => this.actions.openThread?.())
+    on('#btn-viewed', 'click', () => this.actions.markViewed?.())
     on('#btn-archive', 'click', () => this.actions.archiveThread?.())
     on('#btn-deselect', 'click', () => this.actions.select?.(null))
+    on('#btn-follow', 'click', () => this.settings.set('followSelected', !this.settings.get('followSelected')))
     on('#btn-new-session', 'click', () => this.actions.newConversation?.())
     on('#btn-reveal', 'click', () => this.actions.revealProject?.())
     on('#btn-copy-path', 'click', () => this.actions.copyProjectPath?.())
+    on('#btn-hide-project', 'click', () => this.actions.hideProject?.())
+    on('#btn-hidden-toggle', 'click', () => this.toggleHiddenList())
     on('#btn-locate', 'click', () => this.actions.focusProject?.(this.project?.name))
     on('#btn-close-project', 'click', () => this.actions.closeProject?.())
     on('.help', 'click', (e) => {
@@ -355,8 +477,16 @@ export class Hud {
   // ── state in ────────────────────────────────────────────────────────────────────────
 
   syncSettings() {
+    const follow = Boolean(this.settings.get('followSelected'))
+    this.$('#btn-follow').setAttribute('aria-pressed', String(follow))
+    this.$('#btn-follow').title = follow ? 'Stop following selected bot' : 'Follow selected bot'
     for (const c of this.controls) c.sync()
     this.$('.fps').classList.toggle('on', Boolean(this.settings.get('showFps')))
+    const sound = Boolean(this.settings.get('sound'))
+    const btn = this.$('#btn-sound')
+    btn.innerHTML = sound ? ICON.sound : ICON.soundOff
+    btn.setAttribute('aria-pressed', String(sound))
+    btn.title = sound ? 'Mute (M)' : 'Unmute (M)'
   }
 
   setStats(stats) {
@@ -375,8 +505,12 @@ export class Hud {
    * it is a list now because the sidebar is where all the chrome lives, and because a list
    * can carry a count and an alarm without running out of room at eleven repos.
    */
-  setLegend(projects, activeName = null) {
-    const signature = projects.map((p) => `${p.id}:${p.name}:${p.count}:${p.accent}:${p.urgent ? 1 : 0}`).join('|') + `~${activeName}`
+  setLegend(projects, activeName = null, hidden = [], folded = []) {
+    const signature =
+      projects.map((p) => `${p.id}:${p.name}:${p.count}:${p.accent}:${p.urgent ? 1 : 0}`).join('|') +
+      `~${activeName}~` +
+      hidden.map((p) => `${p.name}:${p.count}`).join('|') +
+      `~${folded.length}`
     if (this._last.legend === signature) return
     this._last.legend = signature
 
@@ -386,17 +520,76 @@ export class Hud {
       const b = document.createElement('button')
       b.type = 'button'
       b.className = 'repo'
-      b.title = `${p.count} thread${p.count === 1 ? '' : 's'} in ${p.name}`
+      b.title = p.urgent
+        ? `Morgan attention required in ${p.name}`
+        : `${p.count} thread${p.count === 1 ? '' : 's'} in ${p.name}`
       b.setAttribute('aria-pressed', String(p.id === activeName))
       b.innerHTML =
         `<i class="swatch" style="background:${hex(p.accent)};color:${hex(p.accent)}"></i>` +
         `<span class="n">${escapeHtml(p.name)}</span>` +
-        (p.urgent ? '<i class="alarm"></i>' : '') +
+        (p.urgent ? '<i class="alarm" aria-label="Morgan attention required"></i>' : '') +
         `<span class="count">${p.count}</span>`
       b.addEventListener('click', () => this.actions.pickProject?.(p.id))
       wrap.appendChild(b)
     }
     this.$('.sec-head span').textContent = `${projects.length} repo${projects.length === 1 ? '' : 's'}`
+
+    // The hidden list is its own block at the foot of the sidebar: collapsed by default, because
+    // the whole point of hiding a repo is not to look at it.
+    const block = this.$('.hidden-block')
+    block.hidden = hidden.length === 0 && folded.length === 0
+    const hiddenWrap = this.$('.hidden-projects')
+    hiddenWrap.innerHTML = ''
+    for (const p of hidden) {
+      const accent = PLOT_PALETTE[hashString(p.name) % PLOT_PALETTE.length]
+      const row = document.createElement('div')
+      row.className = 'repo hidden-repo'
+      row.innerHTML =
+        `<i class="swatch" style="background:${hex(accent)};color:${hex(accent)}"></i>` +
+        `<span class="n">${escapeHtml(p.name)}</span>` +
+        `<span class="count">${p.count}</span>`
+      const show = document.createElement('button')
+      show.type = 'button'
+      show.className = 'btn ghost show-repo'
+      show.title = `Show ${p.name} on the map again`
+      show.textContent = 'Show'
+      show.addEventListener('click', () => this.actions.unhideProject?.(p.name))
+      row.appendChild(show)
+      hiddenWrap.appendChild(row)
+    }
+
+    // The dormant fold gets one line rather than a row each: it is a setting, not a list of
+    // decisions, and the thing worth offering is the way back rather than per-repo control.
+    if (folded.length) {
+      const n = folded.reduce((sum, p) => sum + p.count, 0)
+      const row = document.createElement('div')
+      row.className = 'repo hidden-repo folded-note'
+      row.innerHTML =
+        `<span class="n">${folded.length} quiet repo${folded.length === 1 ? '' : 's'}` +
+        `, ${n} thread${n === 1 ? '' : 's'}</span>`
+      const show = document.createElement('button')
+      show.type = 'button'
+      show.className = 'btn ghost show-repo'
+      show.title = 'Put dormant repos back on the map'
+      show.textContent = 'Show'
+      show.addEventListener('click', () => this.settings.set('hideDormant', false))
+      row.appendChild(show)
+      hiddenWrap.appendChild(row)
+    }
+
+    const total = hidden.length + folded.length
+    this.$('#btn-hidden-toggle .label').textContent = `${total} off the map`
+    this._syncHiddenList()
+  }
+
+  toggleHiddenList() {
+    this.hiddenOpen = !this.hiddenOpen
+    this._syncHiddenList()
+  }
+
+  _syncHiddenList() {
+    this.$('#btn-hidden-toggle').setAttribute('aria-expanded', String(this.hiddenOpen))
+    this.$('.hidden-projects').hidden = !this.hiddenOpen
   }
 
   /**
@@ -411,10 +604,18 @@ export class Hud {
       if (this._last.project === null) return
       this._last.project = null
       panel.classList.remove('drilled')
+      panel.classList.remove('open')
+      this._syncLayout()
       return
     }
 
     this.project = project
+    // On a phone, opening a repo pulls the sheet up so its threads are in view — unless an
+    // astronaut was just picked, whose card wants the room above the sheet's peek.
+    if (this.isPhone() && !this.selected && !panel.classList.contains('open')) {
+      panel.classList.add('open')
+      this._syncLayout()
+    }
     // The minute is part of the signature because `ago()` is: without it a repo where
     // nothing is happening keeps whatever "4m ago" it was first drawn with, for as long as
     // you leave the panel open.
@@ -495,6 +696,8 @@ export class Hud {
     }
     this.selected = { agent, thread }
     card.classList.add('on')
+    // On a phone the card docks above the sheet's peek, so the sheet drops to make room.
+    if (this.isPhone()) this.toggleSheet(false)
 
     this.$('.thread-pop .title').textContent = thread.title || 'Untitled thread'
     const status = STATUS_LABEL[agent.status] || agent.status
@@ -502,22 +705,14 @@ export class Hud {
     const bits = [
       `<span class="tag"><i class="swatch" style="background:${hex(agent.trim.getHex())}"></i>${escapeHtml(status)}</span>`,
     ]
-    // The repo is the panel's own heading now, so the card says what the *thread* is.
+    // The repo is the panel's own heading now, so the card says what the *thread* is —
+    // starting with whose it is, since that decides what Open can do.
+    if (thread.harnessName) bits.push(`<span class="tag">${escapeHtml(thread.harnessName)}</span>`)
     if (thread.worktree) bits.push(`<span class="tag">⑂ ${escapeHtml(thread.worktree)}</span>`)
     if (thread.gitBranch) bits.push(`<span class="tag">${escapeHtml(thread.gitBranch)}</span>`)
     if (thread.model) bits.push(`<span class="tag">${escapeHtml(shortModel(thread.model))}</span>`)
     bits.push(`<span>${ago(thread.lastActivityAt)}</span>`)
     meta.innerHTML = bits.join('')
-
-    const details = taskDetailsFor(thread)
-    const summary = this.$('.thread-pop .summary')
-    summary.textContent = details.summary
-    summary.hidden = !details.summary
-    const rows = this.$('.thread-pop .details')
-    rows.innerHTML = details.rows
-      .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`)
-      .join('')
-    rows.hidden = details.rows.length === 0
 
     const pct = Math.round((this.actions.progressFor?.(thread.id) ?? 0) * 100)
     this.$('.thread-pop .progress > i').style.width = `${pct}%`
@@ -526,17 +721,11 @@ export class Hud {
     // astronaut needs its size sixty times a second, and asking the layout for it that
     // often is how a HUD starts costing frames.
     this._cardSize = { w: card.offsetWidth, h: card.offsetHeight }
-    const actorSession = agent.actor?.managingSession
-    const canOpen = actorSession
-      ? actorSession.canOpen === true && typeof actorSession.id === 'string' && Boolean(actorSession.id.trim())
-      : thread.canOpen !== false
-    this.$('#btn-open').disabled = !canOpen
-    this.$('#btn-open').title = canOpen
-      ? agent.actor
-        ? 'Open this run’s managing Hermes session'
-        : 'Open this task’s managing Hermes session'
-      : 'Managing Hermes session unavailable'
-    this.$('#btn-archive').disabled = thread.canArchive === false
+    this.$('#btn-open').disabled = thread.canOpen === false
+    // Only offered when there is something to dismiss. A third button on every card would
+    // crowd the two that are always worth having, and "Viewed" on a thread that is not asking
+    // for anything is a control with no effect.
+    this.$('#btn-viewed').hidden = !thread.unread
   }
 
   /**
@@ -553,6 +742,14 @@ export class Hud {
       if (this._cardOn) {
         this._cardOn = false
         el.classList.remove('on')
+      }
+      return
+    }
+    // On a phone the card is docked above the sheet by the stylesheet; nothing to place.
+    if (this.isPhone()) {
+      if (!this._cardOn) {
+        this._cardOn = true
+        el.classList.add('on')
       }
       return
     }
@@ -597,9 +794,26 @@ export class Hud {
     }
   }
 
-  /** How much of the right-hand edge the sidebar is taking, so the card can avoid it. */
-  setSideWidth(px) {
-    this._sideWidth = px
+  /** Share one measured safe area between camera framing, cards, and the legend. */
+  _syncLayout() {
+    const width = this.el.clientWidth
+    const height = this.el.clientHeight
+    const side = this.$('.side')
+    let right = 0
+    let bottom = 0
+    if (this.visible) {
+      if (this.isPhone()) {
+        // Use the sheet's destination, not an intermediate animation transform.
+        const peek = parseFloat(getComputedStyle(this.el).getPropertyValue('--peek')) || 0
+        const top = side.offsetTop + (side.classList.contains('open') ? 0 : side.offsetHeight - peek)
+        bottom = Math.max(0, height - top)
+      } else {
+        right = Math.max(0, width - side.offsetLeft)
+      }
+    }
+    this._sideWidth = right
+    this.el.style.setProperty('--side', `${right}px`)
+    this.actions.viewportChanged?.({ width, height, right, bottom })
   }
 
   /** Redraw the card's face so it blinks in step with the astronaut it belongs to. */
@@ -682,19 +896,41 @@ export class Hud {
     this.$('#btn-orbit').setAttribute('aria-pressed', String(Boolean(on)))
   }
 
+  /** Whether the layout is the phone one: the sheet, the docked card, the top rail. */
+  isPhone() {
+    return window.matchMedia('(max-width: 600px)').matches
+  }
+
+  /** Pull the sidebar sheet up over the colony, or let it drop to its peek. Phone only. */
+  toggleSheet(force) {
+    const side = this.$('.side')
+    const open = force ?? !side.classList.contains('open')
+    side.classList.toggle('open', open)
+    this._syncLayout()
+    return open
+  }
+
   toggleSettings(force) {
     const panel = this.$('.settings')
     const open = force ?? panel.classList.contains('closed')
     panel.classList.toggle('closed', !open)
     this.$('#btn-settings').setAttribute('aria-pressed', String(open))
-    // Both live in the same slot on the right; the sidebar steps aside rather than hides.
-    this.$('.side').classList.toggle('shifted', open)
+    // Settings replaces the sidebar in its existing slot, including for keyboard users.
+    const side = this.$('.side')
+    side.classList.toggle('covered', open)
+    side.inert = open
+    panel.inert = !open
+    if (open) this.$('#btn-close-settings').focus({ preventScroll: true })
+    else if (panel.contains(document.activeElement)) this.$('#btn-settings').focus({ preventScroll: true })
   }
 
   toggleHelp(force) {
     const el = this.$('.help')
     const open = force ?? !el.classList.contains('open')
+    if (!open && el.contains(document.activeElement)) document.activeElement.blur()
     el.classList.toggle('open', open)
+    el.setAttribute('aria-hidden', String(!open))
+    if (open) this.$('#btn-help-close').focus()
   }
 
   /**
@@ -707,6 +943,7 @@ export class Hud {
     this.el.classList.toggle('hidden', !this.visible)
     this.$('#btn-hide').innerHTML = this.visible ? ICON.eye : ICON.eyeOff
     this.actions.uiVisibility?.(this.visible)
+    this._syncLayout()
     if (!this.visible) this.toggleHelp(false)
     return this.visible
   }
@@ -772,7 +1009,7 @@ function escapeHtml(s) {
 /** Status → the colour family the top-bar counters already use for it. */
 function statusClass(status) {
   if (status === 'working') return 'working'
-  if (status === 'waiting') return 'waiting'
+  if (status === 'waiting' || status === 'requires-morgan') return 'waiting'
   if (status === 'blocked') return 'blocked'
   if (status === 'celebrating') return 'done'
   return 'idle'
@@ -833,33 +1070,13 @@ function ago(ts) {
 export function morganAttentionCount(threads) {
   return threads.filter((thread) => {
     if (typeof thread.requiresMorgan === 'boolean') return thread.requiresMorgan
-    return thread.status === 'waiting' || thread.status === 'blocked'
+    return thread.status === 'requires-morgan' || thread.status === 'waiting' || thread.status === 'blocked'
   }).length
-}
-
-export function taskDetailsFor(thread, relativeTime = ago) {
-  const summary = String(thread?.details?.body || thread?.preview || '').trim().slice(0, 600)
-  if (thread?.source !== 'native-kanban' || !thread.details) return { summary, rows: [] }
-  const details = thread.details
-  const rows = [
-    ['Task', details.taskId],
-    ['Kanban', details.kanbanStatus],
-    ['Attention', thread.attentionLabel],
-    ['Project', details.projectId || details.tenant || thread.project],
-    ['Workspace', details.workspace],
-    ['Worktree', thread.worktree],
-    ['Branch', details.branch],
-    ['Steward', details.steward],
-    ['Assignee', details.assignee || 'unassigned'],
-    ['Run profile', details.runProfile || 'none'],
-    ['Run state', details.runStatus || 'not running'],
-    ['Heartbeat', relativeTime(details.lastHeartbeatAt)],
-  ].filter(([, value]) => value)
-  return { summary, rows }
 }
 
 const TEMPLATE = `
 <aside class="side panel">
+  <div class="grab"></div>
   <header class="brandbar">
     <div class="brand"><i class="dot"></i>Bot Crossing</div>
     <button class="btn icon ghost" id="btn-shot" title="Screenshot (P)">${ICON.camera}</button>
@@ -874,6 +1091,12 @@ const TEMPLATE = `
     <div class="projects-pane">
       <div class="sec-head"><span>Repos</span></div>
       <div class="projects"></div>
+      <div class="hidden-block" hidden>
+        <button type="button" class="hidden-toggle" id="btn-hidden-toggle" aria-expanded="false">
+          <span class="label">0 hidden</span>
+        </button>
+        <div class="hidden-projects" hidden></div>
+      </div>
     </div>
 
     <div class="project-detail">
@@ -892,6 +1115,7 @@ const TEMPLATE = `
           <button class="btn" id="btn-reveal" title="Show this folder in ${FILE_MANAGER}">${ICON.folder} ${FILE_MANAGER}</button>
           <button class="btn" id="btn-copy-path" title="Copy the folder path">${ICON.copy} Copy path</button>
         </div>
+        <button class="btn" id="btn-hide-project" title="Hide this repo from the colony — does not archive its threads">${ICON.eyeOff} Hide from colony</button>
       </div>
       <div class="threads-head"></div>
       <div class="threads"></div>
@@ -901,14 +1125,16 @@ const TEMPLATE = `
 
 <div class="rail panel">
   <button class="btn icon" id="btn-home" title="Reset the view (0)">${ICON.home}</button>
-  <button class="btn icon" id="btn-next" title="Next astronaut waiting on you (N)">${ICON.next}</button>
+  <button class="btn icon" id="btn-next" title="Next bot waiting on you (N)">${ICON.next}</button>
   <div class="sep"></div>
   <button class="btn icon" id="btn-orbit" title="Orbit mode — sweep around the colony (O)" aria-pressed="false">${ICON.orbit}</button>
   <button class="btn icon" id="btn-planet" title="Change planet (Tab)">${ICON.globe}</button>
   <button class="btn icon" id="btn-time" title="Change the time of day (L)">${ICON.sun}</button>
+  <div class="sep"></div>
+  <button class="btn icon" id="btn-sound" title="Mute (M)" aria-pressed="true">${ICON.sound}</button>
 </div>
 
-<div class="settings panel closed">
+<div class="settings panel closed" inert>
   <header>Settings <button class="btn icon ghost" id="btn-close-settings" title="Close">${ICON.close}</button></header>
   <div class="body"></div>
 </div>
@@ -921,14 +1147,14 @@ const TEMPLATE = `
       <div class="title"></div>
       <div class="meta"></div>
     </div>
+    <button class="btn icon ghost" id="btn-follow" title="Follow selected bot" aria-label="Follow selected bot" aria-pressed="false">${ICON.locate}</button>
     <button class="btn icon ghost" id="btn-deselect" title="Deselect (Esc)">${ICON.close}</button>
   </div>
-  <div class="summary"></div>
-  <dl class="details"></dl>
   <div class="progress"><i></i></div>
   <div class="pair">
     <button class="btn primary" id="btn-open" title="Open this thread in the harness it came from (Enter)">${ICON.open} Open</button>
-    <button class="btn" id="btn-archive" title="Archive — this astronaut walks back to the ship (A)">${ICON.archive} Archive</button>
+    <button class="btn" id="btn-viewed" title="Stop this thread asking for you until it moves on again (V)">${ICON.eye} Viewed</button>
+    <button class="btn" id="btn-archive" title="Archive — this bot walks back to the ship (A)">${ICON.archive} Archive</button>
   </div>
 </div>
 
@@ -936,10 +1162,10 @@ const TEMPLATE = `
 <div class="fps panel"></div>
 <div class="hint-pill panel"></div>
 
-<div class="help">
+<div class="help" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="help-title">
   <div class="sheet panel">
-    <h2>Bot Crossing</h2>
-    <p class="sub">Every coding-agent thread on this Mac is an astronaut. They walk out of the ship, claim a plot for their repo, and build. Click one to open its thread; click a zone — its deck or its name — for the repo itself, and start a new conversation there. Navigation works like Google Earth — drag the ground itself, right-drag to tilt, scroll to zoom in on whatever is under the cursor.</p>
+    <h2 id="help-title">Bot Crossing controls</h2>
+    <p class="sub"><strong>World controls are paused while this guide is open.</strong> Each native Hermes Kanban card is a worksite in its repository territory. Builder, Reviewer, and Drone bots appear only for authoritative current runs; Jynx watches each repository with visible work and signals when Morgan is needed. After choosing Explore colony below, drag the ground to pan, right-drag to tilt, and scroll or pinch to zoom at the pointer.</p>
     <div class="cols">
       <div>
         <div class="k"><span>Drag the ground</span><kbd>drag</kbd></div>
@@ -954,25 +1180,27 @@ const TEMPLATE = `
       </div>
       <div>
         <div class="k"><span>Next needing you</span><kbd>N</kbd></div>
-        <div class="k"><span>Open thread</span><kbd>Enter</kbd></div>
+        <div class="k"><span>Open card</span><kbd>Enter</kbd></div>
+        <div class="k"><span>Mark viewed</span><kbd>V</kbd></div>
         <div class="k"><span>Archive</span><kbd>A</kbd></div>
         <div class="k"><span>New conversation</span><kbd>C</kbd></div>
         <div class="k"><span>Orbit mode</span><kbd>O</kbd></div>
         <div class="k"><span>Change planet</span><kbd>Tab</kbd></div>
         <div class="k"><span>Time of day</span><kbd>L</kbd></div>
+        <div class="k"><span>Mute</span><kbd>M</kbd></div>
         <div class="k"><span>Deselect</span><kbd>Esc</kbd></div>
         <div class="k"><span>This sheet</span><kbd>?</kbd></div>
       </div>
     </div>
     <div style="margin-top:16px">
-      <div class="legend-row"><i class="badge" style="background:#1a2b46;color:#8fb4ee">?</i> waiting on your reply — click to open the thread</div>
+      <div class="legend-row"><i class="badge" style="background:#1a2b46;color:#8fb4ee">?</i> Morgan attention required — click to open the card</div>
       <div class="legend-row"><i class="badge" style="background:#3d1c1c;color:#e88b8b">!</i> the session hit an error</div>
       <div class="legend-row"><i class="badge" style="background:#16301f;color:#7fd39a">⚒</i> running right now, building</div>
       <div class="legend-row"><i class="badge" style="background:#332b12;color:#e6c67f">✓</i> its pull request landed</div>
       <div class="legend-row"><i class="badge" style="background:#1d1f2e;color:#a9a8c0">z</i> nothing for three days</div>
     </div>
     <div style="margin-top:18px;display:flex;justify-content:flex-end">
-      <button class="btn primary" id="btn-help-close">Got it</button>
+      <button class="btn primary" id="btn-help-close">Explore colony</button>
     </div>
   </div>
 </div>

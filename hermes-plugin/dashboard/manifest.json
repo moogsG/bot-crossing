@@ -1,0 +1,12 @@
+{
+  "name": "bot-crossing",
+  "label": "Bot Crossing",
+  "description": "Profile-aware diagnostics backend for the native Bot Crossing Desktop page.",
+  "icon": "Organization",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/bot-crossing-dashboard",
+    "hidden": true
+  },
+  "api": "plugin_api.py"
+}

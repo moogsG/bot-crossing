@@ -13,12 +13,47 @@ I would rather say so up front than imply a level of attention I cannot deliver.
 Concretely:
 
 - **Issues** — I read them. I may not act on them, and I may not reply.
-- **Pull requests** — genuinely welcome, and I will try to look. **I use an AI agent to do the
-  first review pass**, and I read its summary before merging anything. I am telling you that
-  because you deserve to know how your work is being evaluated. A human — me — makes the call
-  on whether it merges.
+- **Pull requests** — genuinely welcome, and please read the next section on how they get
+  used, because it is not the usual thing.
 - **Response times** — no promises. Days, weeks, or never, depending on what else is going on.
 - **Feature requests** — probably not, unless they happen to be something I want too.
+
+## How pull requests actually get used
+
+**A PR here is read as a feature request with a working reference implementation.** That is a
+good thing to send and the most useful kind of issue you can open. It is also, usually, not the
+branch that gets merged.
+
+What happens instead: I batch the open PRs, test them on my own machine, and land the intent of
+them together in one branch. Your name goes on the commit. Then your PR gets closed with a link
+to where it shipped.
+
+Three reasons it works this way rather than merge-by-merge:
+
+- **PRs circling the same seam disagree with each other.** Five separate PRs once widened the
+  same "open a thread" interface five incompatible ways. Merged in arrival order that leaves the
+  codebase with five answers to one question; picking one shape and applying it consistently
+  leaves it with one.
+- **I have to test it on my machine before it goes in**, and often that turns up something the
+  branch could not have known about — a path that is wrong on a real install, a scan cost that
+  only shows at volume.
+- **Batching is faster than negotiating each branch to a common shape.** It keeps the project
+  moving instead of leaving good work sitting in a queue going stale.
+
+**So: your PR may well be closed unmerged and still be the reason something shipped.** That is a
+worse deal for you than having your commit merged, and it is written down here so nobody has to
+work it out from a closed tab. If that is not what you want from contributing, that is entirely
+fair — say so in the PR and I will tell you plainly whether I am likely to merge it as-is.
+
+**What makes a PR most useful under this model:** a small, focused change; a clear description of
+the problem it fixes; and what you verified and on what machine. The last one matters more than
+the diff. I cannot test Windows, and I cannot test Linux, and I cannot test a harness I do not
+have installed — so a PR that says "ran it against 40 real Codex sessions on Fedora, here is what
+happened" is worth more to me than a clean patch I have to take on faith.
+
+**And there is a review agent.** I use one for the first pass and read its summary before
+deciding anything. You deserve to know how your work is being evaluated. A human — me — makes
+the call.
 
 **Forking is a first-class option here, not a consolation prize.** It is MIT. If you want to
 take this somewhere I am not going, or you need it maintained on a schedule I cannot offer,
@@ -31,25 +66,32 @@ written down here.
 
 ## What is most worth contributing
 
-**Harness adapters, by a wide margin.** Right now Bot Crossing only reads Claude Code. The
-whole point of the seam in `server/harnesses/` is that adding Codex CLI, OpenCode, Antigravity,
-Amp, or anything else should be one new file and one line in a registry.
+**Harness adapters, by a wide margin.** Bot Crossing reads Claude Code and Codex. The whole
+point of the seam in `server/harnesses/` is that adding OpenCode, Antigravity, Amp, Cursor or
+anything else should be one new file and one line in a registry.
 
 Everything you need is in **[`server/harnesses/README.md`](server/harnesses/README.md)** — the
 interface, the thread shape, the ground rules, and how to find where a given harness keeps its
 sessions on disk.
 
-One caveat worth knowing before you start: **the interface has only ever been implemented once**,
-by the Claude Code adapter it was extracted from. It is very likely the first genuinely different
-harness will not fit perfectly. If yours does not, that is a bug in the seam and not in your
-work — say so in the PR and change what you need to. I would much rather widen the interface
-than have you contort an adapter around it.
+The decisions that are already settled — and why — are in **[DECISIONS.md](DECISIONS.md)**.
+Worth a skim before you start; it will save you writing something I have to say no to.
+
+Two hard rules, and I will not bend on either — both are there because breaking them has
+already cost somebody's machine something:
+
+- **Nothing is ever written to a harness.** Not a transcript, not a session record, not one
+  flag. `data/colony.json` is the only file this project writes.
+- **Nothing is ever read from or executed inside another application's bundle.** Only files
+  under the user's own home directory. Opening a thread goes through a URL the OS resolves, or
+  a command the user already has on `PATH`.
+
+Beyond those, if the interface does not fit your harness, that is a bug in the seam and not in
+your work — say so in the PR and change what you need to. I would much rather widen the
+interface than have you contort an adapter around it.
 
 Also useful:
 
-- **Linux and Windows support.** The scanning half is portable; the opening half is not. Every
-  "open this thread", "reveal this folder" and "start a session here" path goes through macOS's
-  `open(1)` in `server/api.mjs`. That is the whole blocker.
 - **Bug fixes**, especially anything where the colony misrepresents what a thread is actually
   doing. That is the one thing the project has to get right.
 - **Performance**, if you can measure it. See the Performance section of the README for the kind
@@ -68,22 +110,22 @@ You need a real harness installed with real threads for anything interesting to 
 because the built files are checked in and the raw packs are not. You only need it if you are
 changing the art pipeline, and the README explains where to re-download the packs.
 
-There is no test suite and no linter. That is not a standard I am asking you to meet — it is
-just the state of things, and I would rather tell you than have you guess.
+`npm test` runs the suite — the colony file's merge and migration, and the harness contract
+against fixtures. It is not exhaustive and there is no linter. New tests are welcome but not
+demanded; keeping the existing ones green is.
 
 ## What makes a PR easy to say yes to
 
 - **One thing at a time.** A harness adapter, or a bug fix, or a refactor — not all three.
-- **Say what you verified and how.** There are no tests to lean on, so your description is the
-  evidence. "Ran it against 40 real Codex sessions, screenshots attached" is worth more than a
+- **Say what you verified and how.** The suite does not cover much, so your description is
+  still most of the evidence. "Ran it against 40 real Codex sessions, screenshots attached" is worth more than a
   clean diff.
 - **Match the surrounding code.** No semicolons, single quotes, 2-space indent, 110ish columns.
   Comments in this codebase explain *why* — particularly why an obvious approach was rejected.
   That style is deliberate; please keep it where you touch things.
 - **Do not add dependencies casually.** The runtime has two, and I would like it to stay small.
-- **Do not widen what gets written to disk.** The project reads your harness's files and writes
-  exactly one archive flag. That restraint is a feature and I will push back hard on changes to
-  it.
+- **Do not widen what gets written to disk.** See the two hard rules above. That restraint is
+  the feature.
 
 ## Licensing
 

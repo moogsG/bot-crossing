@@ -1,4 +1,5 @@
-export const COMPLETION_GRACE_MS = 2000
+const DEFAULT_CELEBRATION_MS = 2000
+const ACTOR_PROFILES = new Set(['builder', 'reviewer', 'drone'])
 const LIFECYCLE_EVENTS = new Set([
   'claimed',
   'heartbeat',
@@ -7,6 +8,12 @@ const LIFECYCLE_EVENTS = new Set([
   'changes_requested',
   'completed',
   'archived',
+  'crashed',
+  'timed_out',
+  'spawn_failed',
+  'gave_up',
+  'reclaimed',
+  'review_reopened',
 ])
 
 export function createActorState() {
@@ -18,11 +25,27 @@ export function createActorState() {
   }
 }
 
+function currentActor(actor, taskIds) {
+  return Boolean(
+    actor?.id &&
+    actor.taskId &&
+    taskIds.has(actor.taskId) &&
+    actor.runId !== null &&
+    actor.runId !== undefined &&
+    ACTOR_PROFILES.has(String(actor.profile || '').toLowerCase()) &&
+    actor.heartbeat?.freshness !== 'stale'
+  )
+}
+
 export function reconcileActorSnapshot(state, snapshot, { taskIds, cursor = state.cursor, now = Date.now() }) {
   const actors = new Map()
+  const runs = new Set()
   for (const actor of snapshot || []) {
-    if (!actor?.id || !actor.taskId || !taskIds.has(actor.taskId) || actors.has(actor.id)) continue
+    if (!currentActor(actor, taskIds)) continue
+    const run = `${actor.taskId}:${actor.runId}`
+    if (actors.has(actor.id) || runs.has(run)) continue
     actors.set(actor.id, actor)
+    runs.add(run)
   }
 
   const celebrations = new Map()
@@ -42,7 +65,7 @@ export function reconcileActorSnapshot(state, snapshot, { taskIds, cursor = stat
   }
 }
 
-export function reduceActorBatch(state, events, { now = Date.now(), celebrationMs = COMPLETION_GRACE_MS } = {}) {
+export function reduceActorBatch(state, events, { now = Date.now(), celebrationMs = DEFAULT_CELEBRATION_MS } = {}) {
   const next = {
     cursor: state.cursor,
     actors: new Map(state.actors),
@@ -54,15 +77,16 @@ export function reduceActorBatch(state, events, { now = Date.now(), celebrationM
   for (const event of ordered) {
     const id = Number(event?.id)
     if (!Number.isInteger(id) || id <= next.cursor) continue
-    if (id > next.cursor + 1 && next.cursor > 0) next.needsReconcile = true
     next.cursor = id
     if (!LIFECYCLE_EVENTS.has(event.kind)) continue
 
     const actor = [...next.actors.values()].find(
       (entry) => entry.taskId === event.taskId && Number(entry.runId) === Number(event.runId)
     )
-    next.needsReconcile = true
-    if (!actor) continue
+    if (!actor) {
+      if (!['heartbeat', 'completed', 'archived'].includes(event.kind)) next.needsReconcile = true
+      continue
+    }
 
     if (event.kind === 'completed') {
       if (!next.celebrations.has(actor.id)) next.celebrations.set(actor.id, now + celebrationMs)
@@ -70,6 +94,8 @@ export function reduceActorBatch(state, events, { now = Date.now(), celebrationM
     } else if (event.kind === 'archived') {
       next.actors.delete(actor.id)
       next.celebrations.delete(actor.id)
+    } else if (event.kind !== 'heartbeat') {
+      next.needsReconcile = true
     }
   }
   return next
@@ -79,7 +105,7 @@ export function reconcileActorUpdate(
   state,
   snapshot,
   batch,
-  { taskIds, now = Date.now(), celebrationMs = COMPLETION_GRACE_MS }
+  { taskIds, now = Date.now(), celebrationMs = DEFAULT_CELEBRATION_MS }
 ) {
   const boundary = Math.max(0, Number(snapshot?.cursor) || 0)
   const staged = reduceActorBatch(
@@ -100,55 +126,78 @@ export function visibleActors(state, now = Date.now()) {
     .sort((a, b) => a.id.localeCompare(b.id))
 }
 
-const WORKER_ROLES = new Set(['builder', 'reviewer', 'drone'])
-
-function normalizedWorkerRole(profile) {
-  const role = String(profile || '').trim().toLowerCase()
-  return WORKER_ROLES.has(role) ? role : 'worker'
+export function statusForActor(actor) {
+  if (actor?.lifecycleState === 'completed') return 'celebrating'
+  if (actor?.lifecycleState === 'working') return 'working'
+  return 'idle'
 }
 
-export function nativeBadgeKeyFor(status, role) {
-  if (status === 'requires-morgan') return 'waiting'
-  if (status === 'blocked') return 'blocked'
-  if (status === 'celebrating') return 'done'
-  if (status !== 'working' && status !== 'reviewing') return 'none'
+const normalizedPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
 
-  const workerRole = normalizedWorkerRole(role)
-  return workerRole === 'builder' ? 'working' : workerRole
-}
-
-export function actorPresentation(actor) {
-  if (actor?.requiresMorgan === true) {
-    return { status: 'requires-morgan', role: 'jynx', stewardSignal: true }
+/** Merge the persistent project catalog with task-derived repositories without inventing work. */
+export function projectGroups(threads, catalog = [], archivedIds = new Set()) {
+  const groups = new Map()
+  for (const project of catalog) {
+    if (!project?.slug) continue
+    groups.set(project.slug, {
+      id: project.slug,
+      name: project.name || project.slug,
+      path: project.path || '',
+      threads: [],
+    })
   }
-  const lifecycle = actor?.lifecycleState
-  return {
-    status:
-      lifecycle === 'waiting'
-        ? 'internal-wait'
-        : lifecycle === 'completed'
-          ? 'celebrating'
-          : lifecycle || 'idle',
-    role: normalizedWorkerRole(actor?.profile),
-    stewardSignal: false,
+
+  for (const thread of threads || []) {
+    if (thread.archived || archivedIds.has(thread.id)) continue
+    const workspace = normalizedPath(thread.projectPath || thread.cwd)
+    const repository = normalizedPath(thread.repositoryPath)
+    const canonicalGitRepository = String(thread.repositoryId || '').startsWith('git:')
+    const known = catalog.find((project) => {
+      const root = normalizedPath(project.path)
+      if (canonicalGitRepository) return repository && root === repository
+      return (
+        thread.projectId === project.id ||
+        thread.projectId === project.slug ||
+        thread.tenant === project.id ||
+        thread.tenant === project.slug ||
+        thread.project === project.id ||
+        thread.project === project.slug ||
+        thread.project === project.name ||
+        (root && (workspace === root || workspace.startsWith(`${root}/`)))
+      )
+    })
+    const id = known?.slug || thread.repositoryId || thread.project || 'unknown'
+    if (!groups.has(id)) {
+      const name = repository.split('/').at(-1) || thread.project || id
+      groups.set(id, {
+        id,
+        name,
+        path: thread.repositoryPath || thread.projectPath || thread.cwd || '',
+        threads: [],
+      })
+    }
+    groups.get(id).threads.push(
+      known ? { ...thread, project: id, projectPath: known.path || thread.projectPath } : { ...thread, project: id }
+    )
   }
+  return [...groups.values()]
 }
 
-export function standingClipFor(agent) {
-  switch (agent.status) {
-    case 'working': return 'work'
-    case 'reviewing': return 'interact'
-    case 'requires-morgan': return agent.role === 'jynx' && agent.stewardSignal ? 'wave' : 'idle'
-    case 'waiting': return 'wave'
-    case 'blocked': return 'hit'
-    case 'celebrating': return 'cheer'
-    case 'sleeping': return agent.clipKey === 'sit' ? 'sit' : 'sitDown'
-    default: return 'idle'
+/** Join authoritative current runs to their task worksites; tasks themselves are not actors. */
+export function actorRosterEntries(actors, threads, sites) {
+  const threadByTask = new Map()
+  for (const thread of threads.values()) {
+    if (thread.ref?.taskId) threadByTask.set(thread.ref.taskId, thread)
   }
-}
-
-export function actorOpenTarget(actor) {
-  const session = actor?.managingSession
-  if (!session?.canOpen || typeof session.id !== 'string' || !session.id.trim()) return null
-  return { harness: 'hermes-kanban', ref: { sessionId: session.id } }
+  const roster = []
+  const seen = new Set()
+  for (const actor of actors || []) {
+    if (!actor?.id || actor.runId == null || seen.has(actor.id)) continue
+    const thread = threadByTask.get(actor.taskId)
+    const location = thread && sites.get(thread.id)
+    if (!thread || !location) continue
+    roster.push({ id: actor.id, thread, actor, status: statusForActor(actor), ...location })
+    seen.add(actor.id)
+  }
+  return roster.sort((a, b) => a.id.localeCompare(b.id))
 }
