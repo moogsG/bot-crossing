@@ -122,3 +122,23 @@ test('events reject unsafe cursors', async () => {
     assert.deepEqual(response.body, { error: 'since must be a non-negative safe integer' })
   }
 })
+
+test('browser API uses the injected embedded transport without changing standalone URLs', async () => {
+  const calls = []
+  const original = globalThis.__BOT_CROSSING_TRANSPORT__
+  globalThis.__BOT_CROSSING_TRANSPORT__ = async (...args) => {
+    calls.push(args)
+    return new Response(JSON.stringify({ threads: [] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+  try {
+    const { fetchThreads } = await import(`../src/game/api.js?embedded=${Date.now()}`)
+    assert.deepEqual(await fetchThreads(), { threads: [] })
+    assert.equal(calls[0][0], '/api/threads?source=native-kanban')
+  } finally {
+    if (original === undefined) delete globalThis.__BOT_CROSSING_TRANSPORT__
+    else globalThis.__BOT_CROSSING_TRANSPORT__ = original
+  }
+})

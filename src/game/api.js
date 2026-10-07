@@ -1,7 +1,12 @@
 import { mergeState } from './merge-state.js'
 
+const request = (url, options) => {
+  const embedded = globalThis.__BOT_CROSSING_TRANSPORT__
+  return typeof embedded === 'function' ? embedded(url, options) : fetch(url, options)
+}
+
 async function req(url, options) {
-  const res = await fetch(url, options)
+  const res = await request(url, options)
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(body.error || `${res.status} ${res.statusText}`)
   return body
@@ -97,7 +102,7 @@ export async function saveState(state) {
 
   let local = state
   for (let attempt = 0; attempt < SAVE_TRIES; attempt++) {
-    const res = await fetch('/api/state', {
+    const res = await request('/api/state', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...local, baseUpdatedAt }),

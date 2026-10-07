@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import os
 import sqlite3
@@ -21,6 +22,20 @@ class FakeRouter:
     def get(self, path):
         def decorate(handler):
             self.routes.append(("GET", path, handler))
+            return handler
+
+        return decorate
+
+    def put(self, path):
+        def decorate(handler):
+            self.routes.append(("PUT", path, handler))
+            return handler
+
+        return decorate
+
+    def post(self, path):
+        def decorate(handler):
+            self.routes.append(("POST", path, handler))
             return handler
 
         return decorate
@@ -120,7 +135,7 @@ class PluginApiTests(unittest.TestCase):
     def setUp(self):
         self.module = load_plugin_api()
 
-    def test_only_read_only_namespaced_routes_are_registered(self):
+    def test_kanban_routes_are_read_only_and_only_colony_state_is_writable(self):
         self.assertEqual(
             [(method, path) for method, path, _ in self.module.router.routes],
             [
@@ -130,6 +145,10 @@ class PluginApiTests(unittest.TestCase):
                 ("GET", "/threads"),
                 ("GET", "/actors"),
                 ("GET", "/events"),
+                ("GET", "/state"),
+                ("PUT", "/state"),
+                ("GET", "/runtime"),
+                ("POST", "/transport"),
             ],
         )
 
@@ -307,6 +326,62 @@ class PluginApiTests(unittest.TestCase):
         self.assertEqual(bootstrap["source"], "native-kanban")
         self.assertTrue(bootstrap["readOnly"])
         self.assertNotIn(str(root), repr((health, bootstrap)))
+
+    def test_colony_layout_state_is_profile_local_and_optimistically_locked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, _ = create_home(root, "first")
+            second, _ = create_home(root, "second")
+
+            with patch.dict(os.environ, {"HERMES_HOME": str(first)}, clear=False):
+                seed = self.module.put_state({"plots": {"alpha": [[1, 2]]}})
+                conflict = self.module.put_state({"plots": {}, "baseUpdatedAt": seed["updatedAt"] - 1})
+            with patch.dict(os.environ, {"HERMES_HOME": str(second)}, clear=False):
+                isolated = self.module.state()
+
+        self.assertEqual(seed["plots"], {"alpha": [[1, 2]]})
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.content["plots"], {"alpha": [[1, 2]]})
+        self.assertEqual(isolated["plots"], {})
+
+    def test_frame_transport_is_allowlisted_and_preserves_conflict_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, _ = create_home(Path(directory))
+            with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
+                seed = self.module.transport({"method": "PUT", "path": "/api/state", "body": {"plots": {"a": []}}})
+                conflict = self.module.transport({
+                    "method": "PUT",
+                    "path": "/api/state",
+                    "body": {"plots": {}, "baseUpdatedAt": seed["body"]["updatedAt"] - 1},
+                })
+                refused = self.module.transport({"method": "POST", "path": "/api/threads", "body": {}})
+
+        self.assertEqual(seed["status"], 200)
+        self.assertEqual(conflict["status"], 409)
+        self.assertEqual(refused["status"], 403)
+
+    def test_runtime_is_a_self_contained_sandbox_document_with_a_narrow_bridge_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            assets = app / "assets"
+            assets.mkdir()
+            (app / "index.html").write_text(
+                '<link rel="stylesheet" href="/assets/index.css"><script type="module" src="/assets/index.js"></script>',
+                encoding="utf-8",
+            )
+            (assets / "index.css").write_text("body{color:white}", encoding="utf-8")
+            (assets / "index.js").write_text("globalThis.__runtimeLoaded=true", encoding="utf-8")
+            (assets / "crew.glb").write_bytes(b"crew")
+
+            payload = self.module.runtime_payload(app)
+            document = base64.b64decode(payload["src"].split(",", 1)[1]).decode("utf-8")
+
+        self.assertTrue(document.startswith("<!doctype html>"))
+        self.assertIn(payload["bootstrapToken"], document)
+        self.assertEqual(payload["assets"]["crew.glb"], "data:model/gltf-binary;base64,Y3Jldw==")
+        self.assertIn("/__bot-crossing/assets", document)
+        self.assertIn("globalThis.__runtimeLoaded=true", document)
+        self.assertNotIn('src="/assets/', document)
 
 
 if __name__ == "__main__":

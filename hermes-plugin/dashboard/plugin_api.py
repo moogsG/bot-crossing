@@ -1,13 +1,16 @@
-"""Profile-scoped read-only API for the unified Bot Crossing plugin."""
+"""Profile-scoped Bot Crossing API; native Kanban data is strictly read-only."""
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
+import json
 import math
 from pathlib import Path
 import sys
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -26,10 +29,15 @@ if _SUPPORT_SPEC is None or _SUPPORT_SPEC.loader is None:
 _SUPPORT = importlib.util.module_from_spec(_SUPPORT_SPEC)
 sys.modules[_SUPPORT_NAME] = _SUPPORT
 _SUPPORT_SPEC.loader.exec_module(_SUPPORT)
+_RUNTIME = importlib.import_module(f"{_SUPPORT_NAME}.runtime")
 
 ACTOR_EVENT_VOCABULARY = _SUPPORT.ACTOR_EVENT_VOCABULARY
 KanbanReader = _SUPPORT.KanbanReader
 ProjectReader = _SUPPORT.ProjectReader
+read_layout_state = _RUNTIME.read_state
+runtime_document = _RUNTIME.runtime_document
+runtime_payload = _RUNTIME.runtime_payload
+write_layout_state = _RUNTIME.write_state
 
 
 router = APIRouter()
@@ -87,6 +95,7 @@ def bootstrap() -> dict[str, Any]:
             "threads": "threads",
             "actors": "actors",
             "events": "events",
+            "state": "state",
         },
         "board": board.diagnostic(),
         "projects": project_reader.diagnostic(),
@@ -133,3 +142,59 @@ def events(since: str = "0") -> Any:
     _, reader, _ = _readers()
     payload, warnings = reader.scan_events(cursor)
     return {**payload, "warnings": warnings}
+
+
+@router.get("/state")
+def state() -> dict[str, Any]:
+    """Read only Bot Crossing's profile-local presentation state."""
+    home, _, _ = _readers()
+    return read_layout_state(home)
+
+
+@router.put("/state")
+def put_state(payload: dict[str, Any]) -> Any:
+    """Persist Bot Crossing layout state; the native Kanban store is never opened writable."""
+    home, _, _ = _readers()
+    status, value = write_layout_state(home, payload)
+    if status == 409:
+        return JSONResponse(status_code=status, content=value)
+    return value
+
+
+@router.get("/runtime")
+def runtime() -> Any:
+    """Serve the prebuilt colony as an opaque-origin, self-contained frame document."""
+    try:
+        return runtime_payload()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return JSONResponse(status_code=503, content={"error": str(exc)})
+
+
+@router.post("/transport")
+def transport(payload: dict[str, Any]) -> dict[str, Any]:
+    """Broker the opaque frame through the authenticated, profile-scoped Desktop REST door."""
+    method = str(payload.get("method") or "GET").upper()
+    parsed = urlsplit(str(payload.get("path") or ""))
+    reads = {
+        "/api/health": health,
+        "/api/bootstrap": bootstrap,
+        "/api/projects": projects,
+        "/api/threads": threads,
+        "/api/actors": actors,
+        "/api/state": state,
+    }
+    if method == "GET" and parsed.path in reads:
+        result = reads[parsed.path]()
+    elif method == "GET" and parsed.path == "/api/events":
+        result = events(parse_qs(parsed.query).get("since", ["0"])[0])
+    elif method == "PUT" and parsed.path == "/api/state":
+        request_body = payload.get("body")
+        result = put_state(request_body if isinstance(request_body, dict) else {})
+    else:
+        return {"status": 403, "body": {"error": "Bot Crossing request is not allowed"}}
+
+    if isinstance(result, JSONResponse):
+        raw_body = getattr(result, "body", None)
+        body = json.loads(raw_body) if isinstance(raw_body, bytes) else getattr(result, "content", {})
+        return {"status": result.status_code, "body": body}
+    return {"status": 200, "body": result}
