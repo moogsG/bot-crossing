@@ -213,6 +213,9 @@ test('triage escalation remains visible while Jynx stays thread-derived', async 
 test('groups a repository root and sibling worktrees by canonical Git common directory', async () => {
   const { home, databasePath } = await fixtureHome()
   const repository = await gitRepositoryFixture()
+  createProjectsDatabase(path.join(home, 'projects.db'), [
+    { id: 'p_canonical', slug: 'canonical', name: 'Canonical', primary_path: repository.root },
+  ])
   insertTask(databasePath, { id: 't_root', workspace_path: repository.root, branch_name: 'main' })
   insertTask(databasePath, {
     id: 't_first', workspace_kind: 'worktree', workspace_path: repository.first, branch_name: 'fixture/first',
@@ -226,6 +229,19 @@ test('groups a repository root and sibling worktrees by canonical Git common dir
   assert.equal(new Set(threads.map(({ repositoryId }) => repositoryId)).size, 1)
   assert.deepEqual(new Set(threads.map(({ repositoryPath }) => repositoryPath)), new Set([await fsp.realpath(repository.root)]))
   assert.deepEqual(threads.map(({ gitBranch }) => gitBranch).sort(), ['fixture/first', 'fixture/second', 'main'])
+  assert.deepEqual(new Set(threads.map(({ project }) => project)), new Set(['canonical']))
+  assert.deepEqual(new Set(threads.map(({ projectId }) => projectId)), new Set(['p_canonical']))
+})
+
+test('falls back to the canonical repository root name rather than a worktree name', async () => {
+  const { home, databasePath } = await fixtureHome()
+  const repository = await gitRepositoryFixture()
+  insertTask(databasePath, { id: 't_worktree', workspace_kind: 'worktree', workspace_path: repository.first })
+
+  const [thread] = await createHermesKanban({ env: { HERMES_HOME: home } }).scanThreads()
+
+  assert.equal(thread.project, path.basename(repository.root))
+  assert.notEqual(thread.project, path.basename(repository.first))
 })
 
 test('bounds and times out repository identity probes', async () => {

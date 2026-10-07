@@ -207,6 +207,22 @@ class PluginApiTests(unittest.TestCase):
         self.assertEqual([thread["ref"]["taskId"] for thread in threads], ["t_shared"])
         self.assertEqual([project["id"] for project in projects], ["p_active", "p_other", "p_shared"])
 
+    def test_worktree_cards_resolve_explicit_project_catalog_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home, board = create_home(root, "hermes")
+            with sqlite3.connect(home / "projects.db") as db:
+                db.execute("INSERT INTO projects VALUES ('p_canonical', 'canonical', 'Canonical', '/canonical', 0)")
+            insert_task(board, "t_worktree", project_id="p_canonical", workspace_path="/tmp/canonical-first")
+
+            with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
+                thread = self.module.threads()["threads"][0]
+
+        self.assertEqual(thread["project"], "canonical")
+        self.assertEqual(thread["projectId"], "p_canonical")
+        self.assertEqual(thread["worktree"], "")
+        self.assertEqual(thread["projectPath"], "/tmp/canonical-first")
+
     def test_wal_active_board_preserves_thread_actor_and_event_contracts(self):
         with tempfile.TemporaryDirectory() as directory:
             home, board = create_home(Path(directory))

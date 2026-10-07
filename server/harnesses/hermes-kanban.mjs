@@ -140,6 +140,22 @@ async function mapWithConcurrency(values, limit, mapper) {
   return results
 }
 
+function projectFor(task, repository, catalog) {
+  const explicit = String(task.project_id || '')
+  const known = catalog.find((project) =>
+    (explicit && (project.id === explicit || project.slug === explicit))
+    || (repository.repositoryPath && project.path === repository.repositoryPath)
+  )
+  if (known) return known
+  const repositoryName = repository.repositoryPath.split(/[\\/]/).filter(Boolean).at(-1) || ''
+  return {
+    id: explicit,
+    slug: repositoryName || String(task.tenant || task.workspace_path || 'Other'),
+    name: repositoryName || String(task.tenant || task.workspace_path || 'Other'),
+    path: repository.repositoryPath,
+  }
+}
+
 export function createHermesKanban({ env = process.env, execFile = execFileAsync, now = Date.now } = {}) {
   async function detect() {
     try {
@@ -174,6 +190,7 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
   }
 
   async function scanThreads() {
+    const catalog = await scanProjects()
     const db = new DatabaseSync(databasePath(env), { readOnly: true })
     let tasks
     try {
@@ -204,6 +221,7 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
       const repositoryKey = workspacePath ? path.resolve(workspacePath) : `metadata:${project}`
       if (!repositories.has(repositoryKey)) repositories.set(repositoryKey, repositoryFor(workspacePath, project, execFile))
       const repository = await repositories.get(repositoryKey)
+      const projectInfo = projectFor(task, repository, catalog)
       const heartbeat = Math.max(
         epochMilliseconds(task.run_last_heartbeat_at),
         epochMilliseconds(task.last_heartbeat_at)
@@ -213,8 +231,8 @@ export function createHermesKanban({ env = process.env, execFile = execFileAsync
         id: `hermes-kanban:${taskId}`,
         title: String(task.title || 'Untitled task'),
         preview: body.replace(/\s+/g, ' ').trim().slice(0, 240),
-        project,
-        projectId: String(task.project_id || ''),
+        project: projectInfo.slug,
+        projectId: String(projectInfo.id || task.project_id || ''),
         tenant: String(task.tenant || ''),
         projectPath: workspacePath,
         repositoryId: repository.repositoryId,

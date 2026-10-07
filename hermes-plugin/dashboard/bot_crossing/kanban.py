@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
+from .projects import ProjectReader
 
 VISIBLE_STATUSES = ("ready", "running", "review", "blocked")
 ACTOR_PROFILES = {"builder", "reviewer", "drone"}
@@ -114,6 +115,7 @@ class KanbanReader:
             self.root / "kanban.db",
         )
         self.database = next((path for path in candidates if path.is_file()), candidates[0])
+        self.project_reader = ProjectReader(self.home)
 
     def _connect(self) -> sqlite3.Connection:
         if not self.database.is_file():
@@ -180,6 +182,7 @@ class KanbanReader:
         rows, warnings = self._read(self._task_rows, [])
         if warnings:
             return [], warnings
+        catalog, _project_warnings = self.project_reader.scan()
         identities: dict[tuple[str, str], dict[str, str]] = {}
         unique: list[tuple[str, str]] = []
         for row in rows:
@@ -203,6 +206,18 @@ class KanbanReader:
             workspace_name = Path(workspace).name if workspace else ""
             project = str(row["project_id"] or row["tenant"] or workspace_name or "Other")
             repository = identities[(workspace, project)]
+            explicit = str(row["project_id"] or "")
+            known = next(
+                (
+                    candidate for candidate in catalog
+                    if (explicit and explicit in {candidate["id"], candidate["slug"]})
+                    or (repository["repositoryPath"] and candidate["path"] == repository["repositoryPath"])
+                ),
+                None,
+            )
+            repository_name = Path(repository["repositoryPath"]).name if repository["repositoryPath"] else ""
+            project_slug = (known or {}).get("slug") or repository_name or project or "Other"
+            project_id = (known or {}).get("id") or explicit
             heartbeat = max(
                 _epoch_milliseconds(row["run_last_heartbeat_at"]),
                 _epoch_milliseconds(row["last_heartbeat_at"]),
@@ -213,8 +228,8 @@ class KanbanReader:
                     "id": f"hermes-kanban:{task_id}",
                     "title": str(row["title"] or "Untitled task"),
                     "preview": " ".join(body.split())[:240],
-                    "project": project,
-                    "projectId": str(row["project_id"] or ""),
+                    "project": project_slug,
+                    "projectId": project_id,
                     "tenant": str(row["tenant"] or ""),
                     "projectPath": workspace,
                     **repository,
